@@ -1,0 +1,17 @@
+import "server-only";
+import { createClient, type SupabaseClient } from "@supabase/supabase-js";
+
+let client: SupabaseClient | null = null;
+
+export function getSupabase(): SupabaseClient {
+  if (client) return client;
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) {
+    throw new Error(
+      "Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY (Supabase -> Project Settings -> API). Only the Study Room needs these; the private tutor works without them."
+    );
+  }
+  client = createClient(url, key, { auth: { persistSession: false } });
+  return client;
+}
