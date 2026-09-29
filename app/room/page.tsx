@@ -1,0 +1,188 @@
+"use client";
+
+import { useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import { Check, Copy, Lock, LogOut, Plus, Send, Sparkles } from "lucide-react";
+import { useProfile } from "@/components/ProfileProvider";
+import { Markdown } from "@/components/Markdown";
+import { browserSupabase, roomTopic } from "@/lib/client/realtime";
+import { postJson } from "@/lib/client/api";
+
+interface RoomMsg { id: string; speakerId: string; displayName: string; kind: "user" | "agent"; addressedToName?: string | null; content: string; createdAt: string }
+interface Mine { used: string[]; learned: string[]; fellBack: boolean }
+
+const ROOM_KEY = "studybuddy.room.v2";
+const ALPHA = "abcdefghjkmnpqrstuvwxyz23456789";
+function newRoomId() {
+  const b = new Uint8Array(8); crypto.getRandomValues(b);
+  const s = Array.from(b, (x) => ALPHA[x % ALPHA.length]).join("");
+  return `room-${s.slice(0, 4)}-${s.slice(4)}`;
+}
+// Same derivation the server uses (sha256 of "speaker:"+code, first 12 hex) — lets us know which messages are ours.
+async function speakerId(code: string) {
+  const d = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`speaker:${code}`));
+  return Array.from(new Uint8Array(d)).map((x) => x.toString(16).padStart(2, "0")).join("").slice(0, 12);
+}
+
+export default function RoomPage() {
+  const { profile } = useProfile();
+  const sb = useMemo(() => browserSupabase(), []);
+  const [roomId, setRoomId] = useState<string | null>(null);
+  const [joinInput, setJoinInput] = useState("");
+  const [msgs, setMsgs] = useState<RoomMsg[]>([]);
+  const [people, setPeople] = useState<string[]>([]);
+  const [live, setLive] = useState(false);
+  const [recap, setRecap] = useState<string[]>([]);
+  const [draft, setDraft] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [mine, setMine] = useState<Mine | null>(null);
+  const [showMine, setShowMine] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const [myId, setMyId] = useState("");
+  const endRef = useRef<HTMLDivElement>(null);
+  const sid = useRef(typeof crypto !== "undefined" ? crypto.randomUUID() : "x");
+
+  useEffect(() => { try { const r = localStorage.getItem(ROOM_KEY); if (r) setRoomId(r); } catch { /* ignore */ } }, []);
+  useEffect(() => { if (profile) speakerId(profile.code).then(setMyId); }, [profile]);
+
+  // Live wire: Supabase Broadcast (messages) + Presence (who's here). Nothing is stored there.
+  useEffect(() => {
+    if (!sb || !roomId || !profile) return;
+    setMsgs([]); setRecap([]);
+    const ch = sb.channel(roomTopic(roomId), { config: { broadcast: { self: true }, presence: { key: sid.current } } });
+    ch.on("broadcast", { event: "msg" }, ({ payload }) => {
+      const m = payload as RoomMsg;
+      setMsgs((p) => (p.some((x) => x.id === m.id) ? p : [...p, m]));
+    });
+    ch.on("presence", { event: "sync" }, () => {
+      const st = ch.presenceState<{ name: string }>();
+      setPeople([...new Set(Object.values(st).flat().map((p) => p.name))]);
+    });
+    ch.subscribe(async (status) => {
+      setLive(status === "SUBSCRIBED");
+      if (status === "SUBSCRIBED") await ch.track({ name: profile.name });
+    });
+    // History comes from Walrus (the room's shared memory), not from a database.
+    postJson<{ notes: { text: string }[] }>("/api/room/recap", { roomId }).then((r) => setRecap(r.notes.map((n) => n.text))).catch(() => {});
+    return () => { sb.removeChannel(ch); setLive(false); };
+  }, [sb, roomId, profile]);
+
+  useEffect(() => { endRef.current?.scrollIntoView({ block: "end", behavior: "smooth" }); }, [msgs.length]);
+
+  const enter = (id: string) => {
+    const c = id.trim().toLowerCase();
+    if (!c) return;
+    try { localStorage.setItem(ROOM_KEY, c); } catch { /* ignore */ }
+    setRoomId(c);
+  };
+  const leave = () => { try { localStorage.removeItem(ROOM_KEY); } catch { /* ignore */ } setRoomId(null); setMsgs([]); setMine(null); };
+
+  async function send(askBuddy: boolean) {
+    if (!profile || !roomId || !draft.trim() || busy) return;
+    const content = draft.trim();
+    setDraft(""); setBusy(true); setErr(""); setMine(null);
+    try {
+      const r = await postJson<{ usedPrivateNotes: string[]; learnedPrivate: string[]; guard: { fellBack: boolean } }>("/api/room/message", {
+        roomId, code: profile.code, name: profile.name, content, askBuddy,
+        recentLines: msgs.slice(-8).map((m) => ({ displayName: m.displayName, kind: m.kind, content: m.content.slice(0, 300) })),
+      });
+      if (askBuddy) setMine({ used: r.usedPrivateNotes, learned: r.learnedPrivate, fellBack: r.guard.fellBack });
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Couldn’t send."); setDraft(content);
+    } finally { setBusy(false); }
+  }
+
+  return (
+    <div className="page">
+      <div className="page-head">
+        <div>
+          <h1>Study Room</h1>
+          <p>Study with friends in one live chat. Buddy remembers what everyone says here, and quietly uses what it knows about <em>you</em> — never revealing it to the room.</p>
+        </div>
+      </div>
+
+      {!sb && (
+        <div className="banner coral">Live rooms aren’t configured yet. Add <code>NEXT_PUBLIC_SUPABASE_URL</code> and <code>NEXT_PUBLIC_SUPABASE_ANON_KEY</code> in Vercel, then redeploy. <Link href="/status">Open Status</Link></div>
+      )}
+
+      {sb && !roomId && (
+        <div className="card">
+          <h2 className="display" style={{ margin: "0 0 6px", fontSize: 22 }}>Start or join a room</h2>
+          <p className="tiny" style={{ margin: "0 0 16px" }}>Anyone with the room code can join, so share it only with people you want to study with.</p>
+          <button className="btn primary lg" onClick={() => enter(newRoomId())}><Plus size={18} /> Create a new room</button>
+          <form className="row gap" style={{ marginTop: 18 }} onSubmit={(e) => { e.preventDefault(); enter(joinInput); }}>
+            <input className="input" placeholder="Have a code? e.g. room-k7pq-x2mv" value={joinInput} onChange={(e) => setJoinInput(e.target.value)} />
+            <button className="btn ghost">Join</button>
+          </form>
+        </div>
+      )}
+
+      {sb && roomId && profile && (
+        <>
+          <div className="card roombar">
+            <div className="row gap wrap">
+              <span className={`live ${live ? "on" : ""}`}><i /> {live ? "Live" : "Connecting…"}</span>
+              <button className="chip mint" title="Copy room code to share" onClick={async () => { try { await navigator.clipboard.writeText(roomId); setCopied(true); setTimeout(() => setCopied(false), 1400); } catch { /* blocked */ } }}>
+                {copied ? <Check size={13} /> : <Copy size={13} />} {roomId}
+              </button>
+            </div>
+            <div className="row gap">
+              <div className="people" title={people.join(", ")}>
+                {people.slice(0, 5).map((n) => <div key={n} className="avatar">{n.slice(0, 1).toUpperCase()}</div>)}
+              </div>
+              <span className="tiny">{people.length || 1} here</span>
+              <button className="icon-btn" aria-label="Leave room" onClick={leave}><LogOut size={16} /></button>
+            </div>
+          </div>
+
+          {recap.length > 0 && (
+            <details className="card recap">
+              <summary>Earlier in this room · recalled from Walrus memory ({recap.length})</summary>
+              <ul>{recap.map((t, i) => <li key={i}>{t}</li>)}</ul>
+            </details>
+          )}
+
+          <div className="rthread">
+            {msgs.length === 0 && <div className="empty">Nobody has spoken yet. <strong>Send</strong> talks to your friends; <strong>Ask Buddy</strong> also brings the tutor in.</div>}
+            {msgs.map((m) => {
+              const me = m.kind === "user" && m.speakerId === myId;
+              return (
+                <div key={m.id} className={`rmsg ${me ? "me" : ""} ${m.kind === "agent" ? "agent" : ""}`}>
+                  <span className="who">{m.kind === "agent" ? `Study Buddy → ${m.addressedToName ?? "everyone"}` : me ? "You" : m.displayName}</span>
+                  <div className="rbubble">{m.kind === "agent" ? <Markdown>{m.content}</Markdown> : m.content}</div>
+                </div>
+              );
+            })}
+            {busy && <div className="tiny">Buddy is thinking…</div>}
+            <div ref={endRef} />
+          </div>
+
+          {err && <div className="banner coral">{err}</div>}
+          {mine && (
+            <div className="private-note">
+              <button className="chip amber" onClick={() => setShowMine((v) => !v)}><Lock size={12} /> Buddy used {mine.used.length} private note{mine.used.length === 1 ? "" : "s"} about you</button>
+              <span className="tiny">only you can see this{mine.fellBack ? " · reply was replaced by the privacy guard" : ""}</span>
+              {showMine && mine.used.length > 0 && <ul className="drawer" style={{ width: "100%" }}>{mine.used.map((u, i) => <li key={i}>{u}</li>)}</ul>}
+            </div>
+          )}
+
+          <div className="composer-wrap">
+            <div className="composer">
+              <textarea
+                rows={1} value={draft} placeholder="Say something to the room…"
+                onChange={(e) => { setDraft(e.target.value); e.target.style.height = "auto"; e.target.style.height = Math.min(e.target.scrollHeight, 160) + "px"; }}
+                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(false); } }}
+                disabled={busy}
+              />
+              <div className="two-btn">
+                <button className="btn ghost" disabled={busy || !draft.trim()} onClick={() => send(false)}><Send size={15} /> Send</button>
+                <button className="btn primary" disabled={busy || !draft.trim()} onClick={() => send(true)}><Sparkles size={15} /> Ask Buddy</button>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
