@@ -1,3 +1,3 @@
-# Study Buddy - A tutor that remembers you, in private chat and in a group
+# Study Buddy - A tutor that remembers you, Whether in private chat or in a group
 
 
