@@ -68,13 +68,39 @@ test("R2: leak on the first draft, clean retry accepted", async () => {
   assert.match(r.agentReply!, /let's test that/);
 });
 
-test("R3: only the speaker's own words reach shared room memory", async () => {
+test("R3: the speaker's own words AND Buddy's guard-cleared reply reach shared room memory — never a private note's actual wording", async () => {
   const { deps, calls } = makeDeps(() => "Let's try a practice problem, Sam.");
   const said = "I've totally mastered integration by parts, ask me anything";
   await runRoomTurn(deps, { ...base, speakerCode: SAM, speakerName: "Sam", content: said, askBuddy: true });
-  assert.deepEqual(calls.ingestRoom, [`Sam said in the study room: ${said}`]);
+  assert.equal(calls.ingestRoom.length, 2);
+  assert.ok(calls.ingestRoom.includes(`Sam said in the study room: ${said}`));
+  assert.ok(calls.ingestRoom.includes("Study Buddy replied to Sam: Let's try a practice problem, Sam."));
   assert.equal(calls.ingestPrivate[0].ns, privateNamespace(SAM));
-  assert.ok(!calls.ingestRoom.join().includes("practice problem"));
+  assert.ok(!calls.ingestRoom.join().includes("failed the last two quizzes"), "the private note's actual wording must never reach shared memory, even via the now-persisted reply");
+});
+
+test("R6: an ordinary quiz answer does NOT trigger the fact-check instruction, even with private notes on hand", async () => {
+  const { deps, calls } = makeDeps(() => "1945 is correct, nice work!");
+  await runRoomTurn(deps, { ...base, speakerCode: SAM, speakerName: "Sam", content: "1945", askBuddy: true });
+  const prompt = calls.prompts[0];
+  assert.ok(!/FACT-CHECK \(this message/.test(prompt), "must not switch into fact-check mode for a plain quiz answer");
+  assert.match(prompt, /NOT a self-assessment/);
+});
+
+test("R6: a genuine self-assessment DOES trigger the fact-check instruction", async () => {
+  const { deps, calls } = makeDeps(() => "Let's see — quick check on that.");
+  await runRoomTurn(deps, { ...base, speakerCode: SAM, speakerName: "Sam", content: "I already know integration by parts really well", askBuddy: true });
+  const prompt = calls.prompts[0];
+  assert.match(prompt, /FACT-CHECK \(this message looks like a self-assessment\)/);
+});
+
+test("R7: even without Ask Buddy, the speaker's own private memory quietly learns from what they said", async () => {
+  const { deps, calls } = makeDeps(() => { throw new Error("should not be called"); });
+  const r = await runRoomTurn(deps, { ...base, speakerCode: SAM, speakerName: "Sam", content: "I keep failing integration by parts and my exam is Friday", askBuddy: false });
+  assert.equal(r.agentReply, null);
+  assert.equal(calls.ingestPrivate.length, 1);
+  assert.equal(calls.ingestPrivate[0].ns, privateNamespace(SAM));
+  assert.match(calls.ingestPrivate[0].text, /not addressed to the tutor/);
 });
 
 test("Send without Ask Buddy: agent silent, reads nothing private, still remembers public words", async () => {
