@@ -16,11 +16,12 @@ export interface SourceView {
   title: string;
   url: string;
 }
+export type Provider = "groq" | "gemini";
 export type TutorEvent =
   | { type: "status"; step: "recall" | "think" | "seal" }
-  | { type: "meta"; memoryOk: boolean; recalled: NoteView[]; sources: SourceView[] }
+  | { type: "meta"; memoryOk: boolean; recalled: NoteView[]; sources: SourceView[]; provider: Provider; model: string }
   | { type: "token"; t: string }
-  | { type: "done"; learned: string[]; sealError?: string }
+  | { type: "done"; learned: string[]; sealError?: string; topic: { subject: string; topic: string } | null }
   | { type: "error"; message: string };
 
 /** Reads the newline-delimited JSON stream from /api/tutor. */
