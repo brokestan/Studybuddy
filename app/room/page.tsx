@@ -2,13 +2,14 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { Check, Copy, Lock, LogOut, Plus, Send, Sparkles } from "lucide-react";
+import { Check, Copy, Gem, Lock, LogOut, Plus, Send, Sparkles } from "lucide-react";
 import { useProfile } from "@/components/ProfileProvider";
 import { Markdown } from "@/components/Markdown";
 import { browserSupabase, roomTopic } from "@/lib/client/realtime";
 import { postJson } from "@/lib/client/api";
+import type { RoomHistoryLine } from "@/lib/roomHistory";
 
-interface RoomMsg { id: string; speakerId: string; displayName: string; kind: "user" | "agent"; addressedToName?: string | null; content: string; createdAt: string }
+interface RoomMsg { id: string; speakerId?: string; displayName: string; kind: "user" | "agent"; addressedToName?: string | null; content: string; createdAt: string }
 interface Mine { used: string[]; learned: string[]; fellBack: boolean }
 
 const ROOM_KEY = "studybuddy.room.v2";
@@ -30,9 +31,9 @@ export default function RoomPage() {
   const [roomId, setRoomId] = useState<string | null>(null);
   const [joinInput, setJoinInput] = useState("");
   const [msgs, setMsgs] = useState<RoomMsg[]>([]);
+  const [historyCount, setHistoryCount] = useState(0);
   const [people, setPeople] = useState<string[]>([]);
   const [live, setLive] = useState(false);
-  const [recap, setRecap] = useState<string[]>([]);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -46,10 +47,14 @@ export default function RoomPage() {
   useEffect(() => { try { const r = localStorage.getItem(ROOM_KEY); if (r) setRoomId(r); } catch { /* ignore */ } }, []);
   useEffect(() => { if (profile) speakerId(profile.code).then(setMyId); }, [profile]);
 
-  // Live wire: Supabase Broadcast (messages) + Presence (who's here). Nothing is stored there.
+  // Live wire: Supabase Broadcast (messages) + Presence (who's here). Nothing
+  // is stored there — but Walrus IS the durable record, so as soon as we
+  // join we recall the room's actual transcript and seed the thread with it,
+  // then broadcasts append to it live from that point on. That's what makes
+  // "leave the room, come back" show real history instead of an empty chat.
   useEffect(() => {
     if (!sb || !roomId || !profile) return;
-    setMsgs([]); setRecap([]);
+    setMsgs([]); setHistoryCount(0); setMine(null);
     const ch = sb.channel(roomTopic(roomId), { config: { broadcast: { self: true }, presence: { key: sid.current } } });
     ch.on("broadcast", { event: "msg" }, ({ payload }) => {
       const m = payload as RoomMsg;
@@ -63,12 +68,24 @@ export default function RoomPage() {
       setLive(status === "SUBSCRIBED");
       if (status === "SUBSCRIBED") await ch.track({ name: profile.name });
     });
-    // History comes from Walrus (the room's shared memory), not from a database.
-    postJson<{ notes: { text: string }[] }>("/api/room/recap", { roomId }).then((r) => setRecap(r.notes.map((n) => n.text))).catch(() => {});
+    postJson<{ lines: RoomHistoryLine[] }>("/api/room/recap", { roomId })
+      .then((r) => {
+        const history: RoomMsg[] = r.lines.map((l) => ({
+          id: l.blobId,
+          displayName: l.displayName,
+          kind: l.kind,
+          addressedToName: l.addressedToName,
+          content: l.content,
+          createdAt: l.createdAt ?? new Date(0).toISOString(),
+        }));
+        setHistoryCount(history.length);
+        setMsgs((prev) => [...history, ...prev.filter((p) => !history.some((h) => h.id === p.id))]);
+      })
+      .catch(() => {});
     return () => { sb.removeChannel(ch); setLive(false); };
   }, [sb, roomId, profile]);
 
-  useEffect(() => { endRef.current?.scrollIntoView({ block: "end", behavior: "smooth" }); }, [msgs.length]);
+  useEffect(() => { endRef.current?.scrollIntoView({ block: "end" }); }, [msgs.length]);
 
   const enter = (id: string) => {
     const c = id.trim().toLowerCase();
@@ -136,21 +153,18 @@ export default function RoomPage() {
             </div>
           </div>
 
-          {recap.length > 0 && (
-            <details className="card recap">
-              <summary>Earlier in this room · recalled from Walrus memory ({recap.length})</summary>
-              <ul>{recap.map((t, i) => <li key={i}>{t}</li>)}</ul>
-            </details>
-          )}
-
           <div className="rthread">
             {msgs.length === 0 && <div className="empty">Nobody has spoken yet. <strong>Send</strong> talks to your friends; <strong>Ask Buddy</strong> also brings the tutor in.</div>}
-            {msgs.map((m) => {
-              const me = m.kind === "user" && m.speakerId === myId;
+            {historyCount > 0 && <div className="tiny" style={{ textAlign: "center", margin: "2px 0 4px" }}>— earlier in this room, recalled from Walrus —</div>}
+            {msgs.map((m, i) => {
+              const me = m.kind === "user" && (m.speakerId ? m.speakerId === myId : m.displayName === profile.name);
               return (
-                <div key={m.id} className={`rmsg ${me ? "me" : ""} ${m.kind === "agent" ? "agent" : ""}`}>
-                  <span className="who">{m.kind === "agent" ? `Study Buddy → ${m.addressedToName ?? "everyone"}` : me ? "You" : m.displayName}</span>
-                  <div className="rbubble">{m.kind === "agent" ? <Markdown>{m.content}</Markdown> : m.content}</div>
+                <div key={m.id}>
+                  <div className={`rmsg ${me ? "me" : ""} ${m.kind === "agent" ? "agent" : ""}`}>
+                    <span className="who">{m.kind === "agent" ? `Study Buddy → ${m.addressedToName ?? "everyone"}` : me ? "You" : m.displayName}</span>
+                    <div className="rbubble">{m.kind === "agent" ? <Markdown>{m.content}</Markdown> : m.content}</div>
+                  </div>
+                  {historyCount > 0 && i === historyCount - 1 && <div className="tiny" style={{ textAlign: "center", margin: "6px 0" }}>— you’re caught up —</div>}
                 </div>
               );
             })}
@@ -161,7 +175,8 @@ export default function RoomPage() {
           {err && <div className="banner coral">{err}</div>}
           {mine && (
             <div className="private-note">
-              <button className="chip amber" onClick={() => setShowMine((v) => !v)}><Lock size={12} /> Buddy used {mine.used.length} private note{mine.used.length === 1 ? "" : "s"} about you</button>
+              <button className="chip amber" onClick={() => setShowMine((v) => !v)}><Lock size={12} /> used {mine.used.length} private note{mine.used.length === 1 ? "" : "s"} about you</button>
+              {mine.learned.length > 0 && <span className="chip mint"><Gem size={12} /> learned {mine.learned.length} new {mine.learned.length === 1 ? "fact" : "facts"}</span>}
               <span className="tiny">only you can see this{mine.fellBack ? " · reply was replaced by the privacy guard" : ""}</span>
               {showMine && mine.used.length > 0 && <ul className="drawer" style={{ width: "100%" }}>{mine.used.map((u, i) => <li key={i}>{u}</li>)}</ul>}
             </div>
