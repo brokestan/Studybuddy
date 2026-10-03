@@ -11,6 +11,7 @@ interface Status {
   devTests: boolean;
   env: Record<string, boolean | string>;
   llm?: { ok: boolean; model?: string; verified?: boolean; modelsListed?: number; error?: string };
+  gemini?: { ok: boolean; model?: string; verified?: boolean; modelsListed?: number; error?: string };
   memwal?: { ok: boolean; totalMemories?: number | null; target?: number; error?: string };
   realtime?: { ok: boolean; status?: number; error?: string };
 }
@@ -62,10 +63,15 @@ export default function StatusPage() {
       {loading && !s && [0, 1, 2].map((i) => <div key={i} className="skeleton" style={{ height: 76, marginBottom: 10 }} />)}
       {s && (
         <div className="checks">
-          <Row ok={Boolean(s.llm?.ok)} title="AI model (Groq)">
+          <Row ok={Boolean(s.llm?.ok)} title="AI model — Groq (used by default, and always for quiz/cards/room)">
             {s.llm?.ok
               ? <>Working. Using <code>{s.llm.model}</code>{s.llm.verified ? " (confirmed live on Groq)" : " (couldn’t verify the model list, will retry)"} · {s.llm.modelsListed} models listed. Picked automatically, so retired models can’t break the app.</>
               : <>{s.llm?.error ?? "Not working."} → set <code>GROQ_API_KEY</code> in Vercel (free key at console.groq.com/keys), then redeploy.</>}
+          </Row>
+          <Row ok={Boolean(s.gemini?.ok)} title="AI model — Gemini (optional second option in the Tutor's model switcher)">
+            {s.gemini?.ok
+              ? <>Working. Using <code>{s.gemini.model}</code>{s.gemini.verified ? " (confirmed live on Gemini)" : " (couldn’t verify the model list, will retry)"} · {s.gemini.modelsListed} models listed.</>
+              : <>{s.gemini?.error ?? "Not configured."} → optional: set <code>GEMINI_API_KEY</code> in Vercel (free key at aistudio.google.com), then redeploy. The Tutor works fine on Groq alone without this.</>}
           </Row>
           <Row ok={Boolean(s.memwal?.ok)} title="Walrus Memory (mainnet)">
             {s.memwal?.ok
