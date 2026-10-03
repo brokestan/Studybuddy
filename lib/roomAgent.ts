@@ -6,14 +6,29 @@
 //      being answered. No code path reads anyone else's.
 //  R2. The reply passes a deterministic guard; a reply that reproduces private
 //      wording is retried once, then replaced by a safe fallback.
-//  R3. Only the speaker's own words (already public in the room) are written to
-//      the shared room memory. Never the agent's reply, never a private note.
+//  R3. Only the speaker's own words, and Buddy's own already-guard-cleared
+//      replies, are written to the shared room memory. A private note's
+//      wording never crosses into it.
 //  R4. Which private notes were used is returned to the sender only.
 //  R5. Nothing about the room is stored outside Walrus: the live feed is a
 //      stateless broadcast, and room history is recalled from Walrus memory.
+//  R6. The fact-check behavior only ever activates for messages that
+//      genuinely look like a self-assessment — never for ordinary questions,
+//      quiz answers, or chat — so Buddy doesn't awkwardly deflect to "ask me
+//      privately" in the middle of normal conversation.
+//  R7. Buddy quietly learns about a speaker from their own words even when
+//      nobody tagged Buddy, so a study room actually feeds the private tutor
+//      the same way a 1-on-1 session does.
 import { privateNamespace, roomNamespace, speakerIdFor } from "./identity";
 import { findLeaks } from "./leakGuard";
-import { buildRoomSystemPrompt, privateExtractionText, type RoomTranscriptLine } from "./prompts";
+import {
+  buildRoomSystemPrompt,
+  looksLikeSelfClaim,
+  privateExtractionText,
+  privateSoloExtractionText,
+  type RoomTranscriptLine,
+} from "./prompts";
+import { formatAgentLine, formatUserLine } from "./roomHistory";
 
 export interface RoomMessage {
   id: string;
@@ -34,7 +49,7 @@ export interface RoomDeps {
   publish(m: RoomMessage): Promise<void>;
   /** Extract + store facts in a PRIVATE namespace. Returns the facts learned. */
   ingestPrivate(namespace: string, text: string): Promise<string[]>;
-  /** Store text in the SHARED room namespace on Walrus. */
+  /** Store text verbatim in the SHARED room namespace on Walrus. */
   ingestRoom(namespace: string, text: string): Promise<void>;
 }
 
@@ -56,8 +71,9 @@ export interface RoomTurnResult {
 }
 
 export const FALLBACK_REPLY = (name: string) =>
-  `${name}, I have some notes from our one-on-one sessions that are relevant here — ask me in your private tutor chat and I'll go through them with you. Meanwhile, want to try a quick practice question on this topic?`;
+  `${name}, that touches something from our one-on-one sessions — let's go through it there. Meanwhile, want to try a quick practice question on this topic?`;
 
+const MIN_LEARNABLE_LEN = 25; // skip "ok", "lol" — not worth a Walrus write
 const newId = () => globalThis.crypto.randomUUID();
 
 export async function runRoomTurn(deps: RoomDeps, input: RoomTurnInput): Promise<RoomTurnResult> {
@@ -85,9 +101,9 @@ export async function runRoomTurn(deps: RoomDeps, input: RoomTurnInput): Promise
   // R3 + R5: the speaker's own words are public in the room and this is the
   // ONLY durable room history, so remember them (skip trivia).
   const mirrorToRoom = async () => {
-    if (input.content.trim().length < 25) return;
+    if (input.content.trim().length < MIN_LEARNABLE_LEN) return;
     try {
-      await deps.ingestRoom(roomNs, `${input.speakerName} said in the study room: ${input.content}`);
+      await deps.ingestRoom(roomNs, formatUserLine(input.speakerName, input.content));
     } catch (e) {
       console.error("room ingest failed (non-fatal):", e);
     }
@@ -95,7 +111,17 @@ export async function runRoomTurn(deps: RoomDeps, input: RoomTurnInput): Promise
 
   if (!input.askBuddy) {
     await mirrorToRoom();
-    return result; // Buddy listens but stays silent and reads nothing private.
+    // R7: even without an explicit "Ask Buddy", the private tutor should
+    // still learn from what the speaker said — group study should feed the
+    // same memory a 1-on-1 session would, not a dead end.
+    if (input.content.trim().length >= MIN_LEARNABLE_LEN) {
+      try {
+        result.learnedPrivate = await deps.ingestPrivate(privateNs, privateSoloExtractionText(input.speakerName, input.content));
+      } catch (e) {
+        console.error("solo private ingest failed (non-fatal):", e);
+      }
+    }
+    return result; // Buddy stays silent and never reads anyone's private notes here.
   }
 
   const safe = async <T>(p: Promise<T>, fallback: T): Promise<T> => {
@@ -117,9 +143,13 @@ export async function runRoomTurn(deps: RoomDeps, input: RoomTurnInput): Promise
   const participants = Array.from(
     new Set(transcript.filter((m) => m.kind === "user").map((m) => m.displayName).concat(input.speakerName))
   );
+  // R6: decided once per message, from the message itself — not from whether
+  // private notes happen to exist, which is what was causing the fact-check
+  // (and the fallback it can trigger) to fire on plain quiz answers.
+  const selfClaim = looksLikeSelfClaim(input.content);
 
   const build = (strict: boolean) =>
-    buildRoomSystemPrompt({ speakerName: input.speakerName, privateNotes, roomNotes, participants, transcript, strict });
+    buildRoomSystemPrompt({ speakerName: input.speakerName, privateNotes, roomNotes, participants, transcript, selfClaim, strict });
   const userText = `${input.speakerName}: ${input.content}`;
 
   // R2: generate -> guard -> (retry) -> fallback
@@ -144,6 +174,16 @@ export async function runRoomTurn(deps: RoomDeps, input: RoomTurnInput): Promise
     content: reply,
     createdAt: new Date().toISOString(),
   });
+
+  // R3: safe to store — by this point `reply` has already passed the leak
+  // guard (or been replaced by the fixed, private-note-free fallback), so
+  // persisting it adds no new exposure beyond what the room already saw live.
+  // This is what makes room history continuous when someone revisits later.
+  try {
+    await deps.ingestRoom(roomNs, formatAgentLine(input.speakerName, reply));
+  } catch (e) {
+    console.error("agent-reply room ingest failed (non-fatal):", e);
+  }
 
   try {
     result.learnedPrivate = await deps.ingestPrivate(privateNs, privateExtractionText(input.speakerName, input.content, reply));
