@@ -1,4 +1,5 @@
 import { listModels, resolveModel } from "@/lib/llm";
+import { listGeminiModels, resolveGeminiModel } from "@/lib/gemini";
 import { health, isMock, memwalEnv, stats } from "@/lib/memory";
 import { broadcast, realtimeConfigured } from "@/lib/realtime";
 import { limited, json, errMsg } from "@/lib/http";
@@ -24,6 +25,7 @@ export async function GET(req: Request) {
       MEMWAL_SERVER_URL: m.serverUrl,
       NEXT_PUBLIC_SUPABASE_URL: Boolean(process.env.NEXT_PUBLIC_SUPABASE_URL),
       NEXT_PUBLIC_SUPABASE_ANON_KEY: Boolean(process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY),
+      GEMINI_API_KEY: Boolean(process.env.GEMINI_API_KEY),
     },
   };
 
@@ -33,6 +35,21 @@ export async function GET(req: Request) {
     out.llm = { ok: true, model: r.model, verified: r.verified, modelsListed: all.length };
   } catch (e) {
     out.llm = { ok: false, error: errMsg(e) };
+  }
+
+  // Optional: only checked if a key is present. The Tutor page falls back to
+  // Groq-only automatically when this isn't configured — Gemini is a second
+  // option, not a requirement.
+  if (process.env.GEMINI_API_KEY) {
+    try {
+      const r = await resolveGeminiModel(true);
+      const all = await listGeminiModels().catch(() => []);
+      out.gemini = { ok: true, model: r.model, verified: r.verified, modelsListed: all.length };
+    } catch (e) {
+      out.gemini = { ok: false, error: errMsg(e) };
+    }
+  } else {
+    out.gemini = { ok: false, error: "Not configured (optional — lets students switch the Tutor's AI mid-conversation)." };
   }
 
   try {
