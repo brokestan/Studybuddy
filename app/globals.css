@@ -259,6 +259,21 @@ button.chip:hover { filter: brightness(1.12); }
 .face .ans { font-size: 18px; line-height: 1.5; }
 .face .tap { position: absolute; bottom: 14px; font-size: 12px; color: var(--faint); }
 .rate { display: flex; gap: 12px; justify-content: center; }
+.rate4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+.rate-btn {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 14px 8px; border-radius: 14px; border: 1px solid var(--line-2); background: var(--surface);
+  font-size: 13.5px; font-weight: 600; color: var(--text); transition: transform 0.12s ease, filter 0.15s;
+}
+.rate-btn:active { transform: translateY(1px); }
+.rate-btn.again { color: var(--coral); border-color: color-mix(in srgb, var(--coral) 35%, transparent); }
+.rate-btn.again:hover { background: var(--coral-soft); }
+.rate-btn.hard { color: var(--amber); border-color: color-mix(in srgb, var(--amber) 35%, transparent); }
+.rate-btn.hard:hover { background: var(--amber-soft); }
+.rate-btn.good { color: var(--text); }
+.rate-btn.good:hover { border-color: var(--accent); }
+.rate-btn.easy { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+.rate-btn.easy:hover { filter: brightness(1.06); }
 
 /* ---------- memory lens ---------- */
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; margin-bottom: 22px; }
@@ -273,6 +288,8 @@ button.chip:hover { filter: brightness(1.12); }
 .mem .meta { display: flex; gap: 10px; align-items: center; margin-top: 6px; font-size: 11.5px; color: var(--faint); }
 .mem code { background: var(--surface-2); padding: 1px 7px; border-radius: 6px; }
 .empty { color: var(--faint); font-size: 14px; padding: 12px 2px; }
+.hist-row { display: flex; align-items: center; gap: 14px; justify-content: space-between; }
+.hist-row .btn { flex: none; }
 
 /* ---------- study room ---------- */
 .roombar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; padding: 12px 16px; margin-bottom: 14px; }
