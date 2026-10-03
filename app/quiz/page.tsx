@@ -1,10 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Brain, Check, Gem, MessageCircle, RotateCcw, Sparkles, X } from "lucide-react";
+import { Brain, Check, Clock, Gem, MessageCircle, RotateCcw, Sparkles, X } from "lucide-react";
 import { useProfile } from "@/components/ProfileProvider";
-import { postJson, type SourceView } from "@/lib/client/api";
+import { postJson, timeAgo, type SourceView } from "@/lib/client/api";
+import type { QuizHistoryItem } from "@/lib/history";
 
 interface Q { q: string; options: string[]; answerIndex: number; explanation: string; concept: string }
 interface Quiz { title: string; questions: Q[] }
@@ -26,6 +27,23 @@ export default function QuizPage() {
   const [results, setResults] = useState<{ concept: string; correct: boolean }[]>([]);
   const [save, setSave] = useState<"idle" | "saving" | "saved" | "failed">("idle");
   const [err, setErr] = useState("");
+
+  const [history, setHistory] = useState<QuizHistoryItem[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(true);
+
+  const loadHistory = useCallback(async () => {
+    if (!profile) return;
+    setHistoryLoading(true);
+    try {
+      const r = await postJson<{ quizzes: QuizHistoryItem[] }>("/api/history", { code: profile.code });
+      setHistory(r.quizzes);
+    } catch {
+      /* history is a nice-to-have; a failed fetch just leaves the list empty */
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, [profile]);
+  useEffect(() => { loadHistory(); }, [loadHistory]);
 
   async function generate() {
     if (!profile || topic.trim().length < 2) return;
@@ -53,7 +71,13 @@ export default function QuizPage() {
     try {
       const r = await postJson<{ saved: boolean }>("/api/quiz/submit", { code: profile.code, topic: topic.trim(), results });
       setSave(r.saved ? "saved" : "failed");
+      if (r.saved) loadHistory();
     } catch { setSave("failed"); }
+  }
+
+  function retake(t: string) {
+    setTopic(t);
+    setPhase("setup");
   }
 
   const total = quiz?.questions.length ?? 0;
@@ -68,23 +92,48 @@ export default function QuizPage() {
       </div>
 
       {phase === "setup" && (
-        <div className="card setup">
-          <label className="lbl" style={{ marginTop: 0 }}>What do you want to be quizzed on?</label>
-          <input className="input lg" value={topic} maxLength={120} placeholder="e.g. Cell biology, the Cold War, quadratic equations" onChange={(e) => setTopic(e.target.value)} onKeyDown={(e) => e.key === "Enter" && generate()} />
-          <div className="chips" style={{ marginTop: 10 }}>
-            {TOPICS.map((t) => <button key={t} className="chip suggest" onClick={() => setTopic(t)}>{t}</button>)}
+        <>
+          <div className="card setup">
+            <label className="lbl" style={{ marginTop: 0 }}>What do you want to be quizzed on?</label>
+            <input className="input lg" value={topic} maxLength={120} placeholder="e.g. Cell biology, the Cold War, quadratic equations" onChange={(e) => setTopic(e.target.value)} onKeyDown={(e) => e.key === "Enter" && generate()} />
+            <div className="chips" style={{ marginTop: 10 }}>
+              {TOPICS.map((t) => <button key={t} className="chip suggest" onClick={() => setTopic(t)}>{t}</button>)}
+            </div>
+            <div className="row gap wrap" style={{ marginTop: 20 }}>
+              <div><div className="tiny" style={{ marginBottom: 6 }}>Questions</div>
+                <div className="seg">{[3, 5, 8].map((n) => <button key={n} className={count === n ? "on" : ""} onClick={() => setCount(n)}>{n}</button>)}</div></div>
+              <div><div className="tiny" style={{ marginBottom: 6 }}>Difficulty</div>
+                <div className="seg">{(["easy", "medium", "hard"] as const).map((d) => <button key={d} className={difficulty === d ? "on" : ""} onClick={() => setDifficulty(d)}>{d}</button>)}</div></div>
+            </div>
+            {err && <div className="banner coral" style={{ marginTop: 16 }}>{err}</div>}
+            <div style={{ marginTop: 22 }}>
+              <button className="btn primary lg" disabled={topic.trim().length < 2} onClick={generate}><Sparkles size={18} /> Build my quiz</button>
+            </div>
           </div>
-          <div className="row gap wrap" style={{ marginTop: 20 }}>
-            <div><div className="tiny" style={{ marginBottom: 6 }}>Questions</div>
-              <div className="seg">{[3, 5, 8].map((n) => <button key={n} className={count === n ? "on" : ""} onClick={() => setCount(n)}>{n}</button>)}</div></div>
-            <div><div className="tiny" style={{ marginBottom: 6 }}>Difficulty</div>
-              <div className="seg">{(["easy", "medium", "hard"] as const).map((d) => <button key={d} className={difficulty === d ? "on" : ""} onClick={() => setDifficulty(d)}>{d}</button>)}</div></div>
-          </div>
-          {err && <div className="banner coral" style={{ marginTop: 16 }}>{err}</div>}
-          <div style={{ marginTop: 22 }}>
-            <button className="btn primary lg" disabled={topic.trim().length < 2} onClick={generate}><Sparkles size={18} /> Build my quiz</button>
-          </div>
-        </div>
+
+          {historyLoading && <div className="skeleton" style={{ height: 64, marginTop: 16 }} />}
+          {!historyLoading && history.length > 0 && (
+            <div className="sect" style={{ marginTop: 24 }}>
+              <h2><Clock size={16} style={{ color: "var(--amber)" }} /> Recent quizzes</h2>
+              {history.slice(0, 6).map((h) => {
+                const pct = h.total ? h.right / h.total : 0;
+                return (
+                  <div key={h.blobId} className="mem hist-row">
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div className="row gap wrap">
+                        <strong>{h.topic}</strong>
+                        <span className={`chip ${pct >= 0.7 ? "mint" : pct >= 0.4 ? "amber" : "coral"}`}>{h.right}/{h.total}</span>
+                        {h.createdAt && <span className="tiny">{timeAgo(h.createdAt)}</span>}
+                      </div>
+                      {h.missed.length > 0 && <div className="tiny" style={{ marginTop: 6 }}><span style={{ color: "var(--coral)" }}>Revisit:</span> {h.missed.join(", ")}</div>}
+                    </div>
+                    <button className="btn ghost" onClick={() => retake(h.topic)}><RotateCcw size={14} /> Retake</button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </>
       )}
 
       {phase === "loading" && (
