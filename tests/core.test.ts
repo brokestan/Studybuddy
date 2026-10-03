@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { pickModel, isEligibleChatModel, supportsReasoningNone } from "@/lib/modelPicker";
+import { pickModel, isEligibleChatModel, supportsReasoningNone, pickGeminiModel, isEligibleGeminiModel } from "@/lib/modelPicker";
 import { ThinkFilter, parseSSEStream } from "@/lib/sse";
 import { shouldGround, parseSearch, parseSummary, groundOn } from "@/lib/wiki";
 import { rateLimit } from "@/lib/rateLimit";
@@ -106,11 +106,75 @@ test("cards: validates", () => {
 test("summaries: quiz + cards produce compact memory-ready text", () => {
   const t = summarizeQuiz("Calculus", [{ concept: "Chain rule", correct: false }, { concept: "Limits", correct: true }, { concept: "Limits", correct: true }]);
   assert.match(t, /scored 2\/3/); assert.match(t, /Struggled with: Chain rule/); assert.match(t, /solid understanding of: Limits/);
-  assert.match(summarizeCards("Bio", ["ATP"], ["DNA"]), /Needed to repeat: ATP/);
+  const c = summarizeCards("Bio", { again: ["ATP"], hard: ["Golgi"], good: ["Ribosome"], easy: ["Nucleus"] });
+  assert.match(c, /Still shaky on: ATP/); assert.match(c, /Needs more practice: Golgi/); assert.match(c, /Comfortable with: Ribosome/); assert.match(c, /Knows cold: Nucleus/);
 });
 
 test("tutor prompt: includes notes + sources with citation rules; graceful when memory is down", () => {
-  const p = tutorSystemPrompt({ name: "Sam", level: "high", notes: ["Sam is preparing for the SAT"], sources: [{ title: "Sky", url: "u", extract: "The sky is blue because of Rayleigh scattering of sunlight." }], memoryOk: true });
+  const p = tutorSystemPrompt({ name: "Sam", level: "high", notes: ["Sam is preparing for the SAT"], subjectsLine: "", sources: [{ title: "Sky", url: "u", extract: "The sky is blue because of Rayleigh scattering of sunlight." }], memoryOk: true });
   assert.match(p, /preparing for the SAT/); assert.match(p, /\[1\] Sky/); assert.match(p, /cite it like \[1\]/);
-  assert.match(tutorSystemPrompt({ name: "Sam", level: "eli5", notes: [], sources: [], memoryOk: false }), /temporarily unreachable/);
+  assert.match(tutorSystemPrompt({ name: "Sam", level: "eli5", notes: [], subjectsLine: "", sources: [], memoryOk: false }), /temporarily unreachable/);
+});
+
+test("tutor prompt: subjects line appears for continuity when present, omitted when empty", () => {
+  const withSubjects = tutorSystemPrompt({ name: "Sam", level: "high", notes: [], subjectsLine: "Calculus (Integration by parts, Chain rule)", sources: [], memoryOk: true });
+  assert.match(withSubjects, /already covered.*Calculus \(Integration by parts, Chain rule\)/s);
+  const without = tutorSystemPrompt({ name: "Sam", level: "high", notes: [], subjectsLine: "", sources: [], memoryOk: true });
+  assert.ok(!without.includes("already covered"));
+});
+
+test("pickGeminiModel: newest plain Flash wins over older, lite, and non-text variants (real Sep 2026 lineup)", () => {
+  const live = [
+    "models/gemini-1.5-flash", "models/gemini-2.0-flash", "models/gemini-2.0-flash-lite",
+    "models/gemini-2.5-pro", "models/gemini-2.5-flash", "models/gemini-2.5-flash-lite",
+    "models/gemini-2.5-flash-image-preview", "models/gemini-2.5-flash-tts-preview",
+    "models/gemini-2.5-flash-live-preview", "models/gemini-3-flash-preview",
+    "models/gemini-3.1-flash-lite", "models/text-embedding-004",
+  ];
+  assert.equal(pickGeminiModel(live), "gemini-3-flash-preview");
+});
+test("pickGeminiModel: prefers plain flash over flash-lite at the same version", () => {
+  assert.equal(pickGeminiModel(["gemini-2.5-flash-lite", "gemini-2.5-flash"]), "gemini-2.5-flash");
+});
+test("pickGeminiModel: respects a configured preference when it's actually live, ignores it otherwise", () => {
+  assert.equal(pickGeminiModel(["gemini-2.5-flash", "gemini-2.0-flash"], ["gemini-2.5-flash"]), "gemini-2.5-flash");
+  assert.equal(pickGeminiModel(["gemini-3-flash-preview", "gemini-2.5-flash"], ["gemini-2.5-flash-RETIRED"]), "gemini-3-flash-preview");
+});
+test("pickGeminiModel: excludes pro, image, tts, live, and embedding models entirely", () => {
+  for (const bad of ["gemini-2.5-pro", "gemini-2.5-flash-image-preview", "gemini-2.5-flash-tts-preview", "gemini-2.5-flash-live-preview", "text-embedding-004", "gemini-embedding-001"])
+    assert.equal(isEligibleGeminiModel(bad), false, bad);
+  assert.equal(pickGeminiModel(["gemini-2.5-pro", "text-embedding-004"]), null);
+});
+test("pickGeminiModel: strips the 'models/' prefix Google's API returns", () => {
+  assert.equal(pickGeminiModel(["models/gemini-2.5-flash"]), "gemini-2.5-flash");
+});
+
+test("looksLikeSelfClaim: catches genuine self-assessments", async () => {
+  const { looksLikeSelfClaim } = await import("@/lib/prompts");
+  for (const s of [
+    "I've totally mastered integration by parts, ask me anything!",
+    "I already know this really well",
+    "i understand derivatives no problem",
+    "I'm confident with quadratic equations",
+    "I already studied the whole chapter",
+  ]) {
+    assert.equal(looksLikeSelfClaim(s), true, s);
+  }
+});
+
+test("looksLikeSelfClaim: does NOT fire on ordinary quiz answers, questions, or chat", async () => {
+  const { looksLikeSelfClaim } = await import("@/lib/prompts");
+  for (const s of [
+    "42",
+    "B",
+    "the mitochondria",
+    "1945",
+    "What's the integral of x cos x?",
+    "Can someone explain the chain rule?",
+    "anyone up for studying tonight after dinner?",
+    "I think the answer is Paris",
+    "I have a question about photosynthesis",
+  ]) {
+    assert.equal(looksLikeSelfClaim(s), false, s);
+  }
 });
