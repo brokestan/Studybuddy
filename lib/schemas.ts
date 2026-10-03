@@ -15,6 +15,7 @@ export const TutorBody = z.object({
   message: z.string().trim().min(1).max(2000),
   history: z.array(z.object({ role: z.enum(["user", "assistant"]), content: z.string().max(4000) })).max(24).default([]),
   level: z.enum(LEVELS).default("high"),
+  provider: z.enum(["groq", "gemini"]).default("groq"),
 });
 export const OpenBody = z.object({ code, name });
 export const QuizGenBody = z.object({ code, topic, count: z.number().int().min(3).max(8).default(5), difficulty: z.enum(["easy", "medium", "hard"]).default("medium") });
@@ -27,10 +28,13 @@ export const CardsGenBody = z.object({ code, topic, count: z.number().int().min(
 export const CardsReviewBody = z.object({
   code,
   topic,
+  again: z.array(z.string().max(200)).max(20).default([]),
   hard: z.array(z.string().max(200)).max(20).default([]),
+  good: z.array(z.string().max(200)).max(20).default([]),
   easy: z.array(z.string().max(200)).max(20).default([]),
 });
 export const LensBody = z.object({ code });
+export const HistoryBody = z.object({ code });
 export const RoomMessageBody = z.object({
   roomId,
   code,
