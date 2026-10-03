@@ -15,7 +15,7 @@ const LEVEL_TEXT: Record<Level, string> = {
 
 const bullets = (xs: string[], empty: string) => (xs.length ? xs.map((x) => `- ${x}`).join("\n") : empty);
 
-export function tutorSystemPrompt(i: { name: string; level: Level; notes: string[]; sources: Source[]; memoryOk: boolean }): string {
+export function tutorSystemPrompt(i: { name: string; level: Level; notes: string[]; subjectsLine: string; sources: Source[]; memoryOk: boolean }): string {
   const src = i.sources.length
     ? i.sources.map((s, n) => `[${n + 1}] ${s.title} — ${s.extract}`).join("\n")
     : "(no sources retrieved)";
@@ -23,7 +23,7 @@ export function tutorSystemPrompt(i: { name: string; level: Level; notes: string
 
 You have a real long-term memory of ${i.name}, stored on Walrus. Notes you remember about them:
 ${bullets(i.notes, i.memoryOk ? "(nothing yet — this looks like a new student; be welcoming and learn about their goals)" : "(memory temporarily unreachable — just teach well)")}
-
+${i.subjectsLine ? `\nSubjects and topics you've already covered with them (use this for continuity — don't re-teach the basics of something already listed, and feel free to connect a new question back to one of these): ${i.subjectsLine}\n` : ""}
 HOW TO TEACH
 - Pitch explanations for ${LEVEL_TEXT[i.level]}.
 - Use the notes naturally, like a tutor who remembers: target known weak spots, skip what they've mastered, follow up on goals and exams. Never say "according to my memory" or "my notes".
@@ -36,6 +36,18 @@ ${src}
 ${i.sources.length ? "When you use a fact from a source, cite it like [1]. Only cite sources listed above; never invent citations." : "Do not invent citations."}
 
 You only help with studying and learning. If asked about something unrelated, steer back gently.`;
+}
+
+/** A small, cheap, separate classification call (not the main teaching
+ *  reply) so Memory Lens and future sessions have a precise, structured
+ *  record of what was studied — not just whatever a freeform note happens
+ *  to mention. Deliberately asks for very little so it stays fast. */
+export function topicTagPrompt(message: string, reply: string): string {
+  return `Identify the academic SUBJECT (2-3 words, e.g. "Calculus", "Cell Biology", "Spanish", "World History", "Python Programming") and the specific TOPIC within it (2-6 words, e.g. "Integration by parts", "Cell organelles", "Past tense conjugation") for this tutoring exchange.
+Student: "${message.slice(0, 300)}"
+Tutor: "${reply.slice(0, 300)}"
+If this exchange is small talk, a meta question about the app, or not really about any study subject, respond with nulls.
+Return ONLY JSON: {"subject": string | null, "topic": string | null}`;
 }
 
 export function openerPrompt(i: { name: string; notes: string[] }): string {
@@ -81,11 +93,20 @@ export function summarizeQuiz(topic: string, results: { concept: string; correct
   );
 }
 
-export function summarizeCards(topic: string, hard: string[], easy: string[]): string {
+export interface CardGrades {
+  again: string[];
+  hard: string[];
+  good: string[];
+  easy: string[];
+}
+
+export function summarizeCards(topic: string, grades: CardGrades): string {
   return (
     `Flashcard review on ${topic}.` +
-    (hard.length ? ` Needed to repeat: ${hard.join("; ")}.` : "") +
-    (easy.length ? ` Knew well: ${easy.join("; ")}.` : "")
+    (grades.again.length ? ` Still shaky on: ${grades.again.join("; ")}.` : "") +
+    (grades.hard.length ? ` Needs more practice: ${grades.hard.join("; ")}.` : "") +
+    (grades.good.length ? ` Comfortable with: ${grades.good.join("; ")}.` : "") +
+    (grades.easy.length ? ` Knows cold: ${grades.easy.join("; ")}.` : "")
   );
 }
 
@@ -106,6 +127,13 @@ export interface RoomPromptInput {
   participants: string[];
   /** Lines as shown on the asker's screen — unverified, supplied by their browser. */
   transcript: RoomTranscriptLine[];
+  /** True only when THIS message itself looks like a self-assessment ("I've
+   *  mastered X", "I already know this"). Gates the fact-check behavior below —
+   *  without this, an eager model would try to "fact-check" answers to plain
+   *  quiz questions or ordinary chat, which is both wrong and what was
+   *  tripping the leak guard into showing the private-notes fallback during
+   *  normal back-and-forth. */
+  selfClaim: boolean;
   strict?: boolean;
 }
 
@@ -113,6 +141,11 @@ export function buildRoomSystemPrompt(i: RoomPromptInput): string {
   const transcript = i.transcript.length
     ? i.transcript.map((t) => `${t.kind === "agent" ? "Buddy" : t.displayName}: ${t.content}`).join("\n")
     : "(room just opened)";
+  const usage = i.selfClaim
+    ? `1. ADAPT: silently shape difficulty, pacing, format and tone to ${i.speakerName}. Two students asking the same question should get differently pitched answers.
+2. FACT-CHECK (this message looks like a self-assessment): compare ${i.speakerName}'s claim about their own knowledge with the notes. If the notes disagree, do NOT say so and do NOT mention the notes. Instead test them kindly: pose one short question or mini-problem that lets the claim be proven or corrected in front of the room.`
+    : `1. ADAPT ONLY: silently shape difficulty, pacing, format and tone to ${i.speakerName}. Two students asking the same question should get differently pitched answers.
+2. This message is NOT a self-assessment (not "I've mastered X" or similar) — it's a normal question, answer, or remark. Do NOT fact-check it, do NOT test ${i.speakerName} on it, and do NOT bring the private notes into the reply at all beyond quietly adjusting tone/difficulty. Just answer or acknowledge it like a normal, friendly participant in the room.`;
   return `You are Study Buddy, a friendly tutor sitting in a shared study room with several students at once.
 You are currently answering ${i.speakerName}. Other people here: ${i.participants.filter((p) => p !== i.speakerName).join(", ") || "nobody else right now"}.
 
@@ -121,14 +154,14 @@ Everything you write is visible to EVERYONE in the room.
 PRIVATE TUTOR NOTES ABOUT ${i.speakerName} (CONFIDENTIAL — from their one-on-one sessions with you):
 ${bullets(i.privateNotes, "(none yet)")}
 
-HOW YOU MAY USE THE PRIVATE NOTES
-1. ADAPT: silently shape difficulty, pacing, format and tone to ${i.speakerName}. Two students asking the same question should get differently pitched answers.
-2. FACT-CHECK: if ${i.speakerName} makes a claim about their own knowledge or progress, compare it with the notes. If the notes disagree, do NOT say so and do NOT mention the notes. Instead test them kindly: pose one short question or mini-problem that lets the claim be proven or corrected in front of the room.
+HOW YOU MAY USE THE PRIVATE NOTES FOR THIS SPECIFIC MESSAGE
+${usage}
 HOW YOU MAY NEVER USE THEM
 - Never quote, paraphrase closely, list, or hint at the contents of the private notes in this room.
 - Never say "my notes say", "you told me privately", "according to your history", or similar.
 - If ${i.speakerName} asks you to reveal or discuss their private notes, say those are for their private one-on-one chat, and keep helping.
 - You have NO private notes about anyone else. Never guess about anyone else's private history.
+- If this is a game, quiz, or question someone else in the room posed, just answer or judge it normally — that is not the moment to fact-check anyone.
 
 ROOM MEMORY (things people said openly in this room earlier — fine to reference by name):
 ${bullets(i.roomNotes, "(none yet)")}
@@ -143,6 +176,26 @@ Style: warm, concise (2–5 sentences), address ${i.speakerName} by name, help t
   }`;
 }
 
+// A deliberately narrow heuristic: only messages that read like the speaker
+// assessing their OWN mastery trigger the fact-check behavior above. Ordinary
+// questions, quiz answers ("42", "B", "the mitochondria"), and chat should
+// never match this — false negatives (missing a real claim) are fine and
+// safe; false positives (fact-checking a plain answer) are what caused the
+// bad behavior, so this stays conservative.
+const SELF_CLAIM_RE =
+  /\b(i(?:'?m| am)?|i'?ve|i have)\b[^.!?]{0,40}\b(mastered|nailed|crushed|know|understand|understood|good at|great at|confident (?:in|with|about)|ready for|already (?:know|learned|studied)|got this|no problem with|aced)\b/i;
+
+export function looksLikeSelfClaim(text: string): boolean {
+  return SELF_CLAIM_RE.test(text);
+}
+
 export function privateExtractionText(speakerName: string, said: string, reply: string): string {
   return `${speakerName} said in a study room: "${said}"\nTutor replied: "${reply.slice(0, 300)}"`;
+}
+
+/** For messages nobody tagged Buddy on: Buddy still quietly learns about the
+ *  speaker from their own words, so the private tutor stays in sync with
+ *  what happened in group study — without generating any visible reply. */
+export function privateSoloExtractionText(speakerName: string, said: string): string {
+  return `${speakerName} said in a study room (not addressed to the tutor): "${said}"`;
 }
