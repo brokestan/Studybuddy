@@ -35,17 +35,24 @@ export default function TutorPage() {
   // Personalized greeting built from what Walrus remembers. Only runs once per
   // session (openerFetched) — coming back from Quiz/Cards/Room/Memory/Status
   // must not re-fetch and overwrite an already-underway conversation.
+  // Counts opener requests so only the NEWEST one may apply its result (e.g. after
+  // "New chat"). Crucially, the result is NOT tied to this effect's cleanup:
+  // markOpenerFetched() below changes `openerFetched`, which re-runs this effect,
+  // and a cleanup-based "alive" flag would then throw the greeting away on arrival
+  // — leaving "checking what Walrus remembers…" on screen forever. The state lives
+  // in the session provider, so applying it after a re-render is safe.
+  const openerReq = useRef(0);
   useEffect(() => {
     if (!profile || openerFetched || msgs.length > 0) return;
-    let alive = true;
+    const id = ++openerReq.current;
     markOpenerFetched();
     // The server caps its own waits, but a cold start can delay the request
     // itself. After 25s give up on the personalised greeting and show the plain one.
     const ctl = new AbortController();
     const giveUp = setTimeout(() => ctl.abort(), 25_000);
     postJson<TutorOpener>("/api/tutor/open", { code: profile.code, name: profile.name }, ctl.signal)
-      .then((o) => alive && setOpener(o))
-      .catch(() => alive && setOpenerErr(true))
+      .then((o) => { if (openerReq.current === id) setOpener(o); })
+      .catch(() => { if (openerReq.current === id) setOpenerErr(true); })
       .finally(() => clearTimeout(giveUp));
     try {
       const pre = sessionStorage.getItem("sb.prefill");
@@ -54,7 +61,6 @@ export default function TutorPage() {
         sessionStorage.removeItem("sb.prefill");
       }
     } catch { /* ignore */ }
-    return () => { alive = false; };
   }, [profile, openerFetched, msgs.length, markOpenerFetched, setOpener, setOpenerErr, setInput]);
 
   useEffect(() => {
