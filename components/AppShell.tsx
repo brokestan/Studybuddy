@@ -2,18 +2,21 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { Activity, Brain, Check, Copy, Layers, ListChecks, LogOut, MessageCircle, Moon, Sun, Users } from "lucide-react";
+import { Brain, Check, Copy, Layers, ListChecks, LogOut, MessageCircle, Moon, Sun, Users } from "lucide-react";
 import { Logo } from "./Logo";
 import { Onboarding } from "./Onboarding";
 import { useProfile } from "./ProfileProvider";
 
+// Status is intentionally NOT in this list — it's a setup/diagnostic page
+// for whoever is running the app, not something regular students should see
+// as a tab. It's still reachable directly at /status if you want to check it
+// yourself; PUBLIC below is what lets that URL work without onboarding first.
 const NAV = [
   { href: "/", label: "Tutor", icon: MessageCircle },
   { href: "/quiz", label: "Quiz", icon: ListChecks },
   { href: "/cards", label: "Flashcards", icon: Layers },
   { href: "/room", label: "Study Room", icon: Users },
   { href: "/memory", label: "Memory", icon: Brain },
-  { href: "/status", label: "Status", icon: Activity },
 ];
 const PUBLIC = new Set(["/status"]);
 
@@ -80,7 +83,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       </aside>
       <main className="main">{children}</main>
       <nav className="tabbar" aria-label="Primary">
-        {NAV.filter((n) => n.href !== "/status").map((n) => {
+        {NAV.map((n) => {
           const on = n.href === "/" ? path === "/" : path.startsWith(n.href);
           return (
             <Link key={n.href} href={n.href} className={`tab ${on ? "on" : ""}`}>

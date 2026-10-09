@@ -13,9 +13,9 @@ export async function POST(req: Request) {
   if (lim) return lim;
   const p = await parse(req, CardsReviewBody);
   if (!p.ok) return p.res;
-  const { code, topic, hard, easy } = p.data;
-  if (!hard.length && !easy.length) return json({ saved: false, summary: "" });
-  const summary = summarizeCards(topic, hard, easy);
+  const { code, topic, again, hard, good, easy } = p.data;
+  if (!again.length && !hard.length && !good.length && !easy.length) return json({ saved: false, summary: "" });
+  const summary = summarizeCards(topic, { again, hard, good, easy });
   try {
     await remember(privateNamespace(code), summary);
     return json({ saved: true, summary });

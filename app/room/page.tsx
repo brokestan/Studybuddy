@@ -2,16 +2,23 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { Check, Copy, Lock, LogOut, Plus, Send, Sparkles } from "lucide-react";
+import { Check, Copy, Gem, Lock, LogOut, Plus, Send, Sparkles } from "lucide-react";
 import { useProfile } from "@/components/ProfileProvider";
 import { Markdown } from "@/components/Markdown";
 import { browserSupabase, roomTopic } from "@/lib/client/realtime";
-import { postJson } from "@/lib/client/api";
+import { ApiError, postJson, type Provider } from "@/lib/client/api";
+import type { RoomHistoryLine } from "@/lib/roomHistory";
 
-interface RoomMsg { id: string; speakerId: string; displayName: string; kind: "user" | "agent"; addressedToName?: string | null; content: string; createdAt: string }
-interface Mine { used: string[]; learned: string[]; fellBack: boolean }
+interface RoomMsg { id: string; speakerId?: string; displayName: string; kind: "user" | "agent"; addressedToName?: string | null; content: string; createdAt: string }
+interface Mine { used: string[]; learned: string[]; fellBack: boolean; via: string | null }
 
 const ROOM_KEY = "studybuddy.room.v2";
+const PROVIDER_KEY = "studybuddy.room.provider";
+const PROVIDERS: { id: Provider; label: string }[] = [
+  { id: "groq", label: "Groq (Qwen)" },
+  { id: "gemini", label: "Gemini" },
+];
+const providerLabel = (p: Provider) => (p === "gemini" ? "Gemini" : "Groq");
 const ALPHA = "abcdefghjkmnpqrstuvwxyz23456789";
 function newRoomId() {
   const b = new Uint8Array(8); crypto.getRandomValues(b);
@@ -30,26 +37,35 @@ export default function RoomPage() {
   const [roomId, setRoomId] = useState<string | null>(null);
   const [joinInput, setJoinInput] = useState("");
   const [msgs, setMsgs] = useState<RoomMsg[]>([]);
+  const [historyCount, setHistoryCount] = useState(0);
   const [people, setPeople] = useState<string[]>([]);
   const [live, setLive] = useState(false);
-  const [recap, setRecap] = useState<string[]>([]);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [mine, setMine] = useState<Mine | null>(null);
   const [showMine, setShowMine] = useState(false);
   const [copied, setCopied] = useState(false);
+  // Same switch the Tutor has. It only changes which AI writes Buddy's replies —
+  // the memory Buddy reads (and the privacy rules around it) are identical either way.
+  const [provider, setProviderState] = useState<Provider>("groq");
   const [myId, setMyId] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
   const sid = useRef(typeof crypto !== "undefined" ? crypto.randomUUID() : "x");
 
   useEffect(() => { try { const r = localStorage.getItem(ROOM_KEY); if (r) setRoomId(r); } catch { /* ignore */ } }, []);
   useEffect(() => { if (profile) speakerId(profile.code).then(setMyId); }, [profile]);
+  useEffect(() => { try { const v = localStorage.getItem(PROVIDER_KEY); if (v === "groq" || v === "gemini") setProviderState(v); } catch { /* ignore */ } }, []);
+  const setProvider = (p: Provider) => { setProviderState(p); try { localStorage.setItem(PROVIDER_KEY, p); } catch { /* ignore */ } };
 
-  // Live wire: Supabase Broadcast (messages) + Presence (who's here). Nothing is stored there.
+  // Live wire: Supabase Broadcast (messages) + Presence (who's here). Nothing
+  // is stored there — but Walrus IS the durable record, so as soon as we
+  // join we recall the room's actual transcript and seed the thread with it,
+  // then broadcasts append to it live from that point on. That's what makes
+  // "leave the room, come back" show real history instead of an empty chat.
   useEffect(() => {
     if (!sb || !roomId || !profile) return;
-    setMsgs([]); setRecap([]);
+    setMsgs([]); setHistoryCount(0); setMine(null);
     const ch = sb.channel(roomTopic(roomId), { config: { broadcast: { self: true }, presence: { key: sid.current } } });
     ch.on("broadcast", { event: "msg" }, ({ payload }) => {
       const m = payload as RoomMsg;
@@ -63,12 +79,24 @@ export default function RoomPage() {
       setLive(status === "SUBSCRIBED");
       if (status === "SUBSCRIBED") await ch.track({ name: profile.name });
     });
-    // History comes from Walrus (the room's shared memory), not from a database.
-    postJson<{ notes: { text: string }[] }>("/api/room/recap", { roomId }).then((r) => setRecap(r.notes.map((n) => n.text))).catch(() => {});
+    postJson<{ lines: RoomHistoryLine[] }>("/api/room/recap", { roomId })
+      .then((r) => {
+        const history: RoomMsg[] = r.lines.map((l) => ({
+          id: l.blobId,
+          displayName: l.displayName,
+          kind: l.kind,
+          addressedToName: l.addressedToName,
+          content: l.content,
+          createdAt: l.createdAt ?? new Date(0).toISOString(),
+        }));
+        setHistoryCount(history.length);
+        setMsgs((prev) => [...history, ...prev.filter((p) => !history.some((h) => h.id === p.id))]);
+      })
+      .catch(() => {});
     return () => { sb.removeChannel(ch); setLive(false); };
   }, [sb, roomId, profile]);
 
-  useEffect(() => { endRef.current?.scrollIntoView({ block: "end", behavior: "smooth" }); }, [msgs.length]);
+  useEffect(() => { endRef.current?.scrollIntoView({ block: "end" }); }, [msgs.length]);
 
   const enter = (id: string) => {
     const c = id.trim().toLowerCase();
@@ -83,13 +111,20 @@ export default function RoomPage() {
     const content = draft.trim();
     setDraft(""); setBusy(true); setErr(""); setMine(null);
     try {
-      const r = await postJson<{ usedPrivateNotes: string[]; learnedPrivate: string[]; guard: { fellBack: boolean } }>("/api/room/message", {
-        roomId, code: profile.code, name: profile.name, content, askBuddy,
+      const r = await postJson<{ usedPrivateNotes: string[]; learnedPrivate: string[]; guard: { fellBack: boolean }; provider: Provider; model: string | null }>("/api/room/message", {
+        roomId, code: profile.code, name: profile.name, content, askBuddy, provider,
         recentLines: msgs.slice(-8).map((m) => ({ displayName: m.displayName, kind: m.kind, content: m.content.slice(0, 300) })),
       });
-      if (askBuddy) setMine({ used: r.usedPrivateNotes, learned: r.learnedPrivate, fellBack: r.guard.fellBack });
+      // Shown only to the sender (in the private panel) — never broadcast to the room.
+      if (askBuddy) setMine({ used: r.usedPrivateNotes, learned: r.learnedPrivate, fellBack: r.guard.fellBack, via: r.model ? `${providerLabel(r.provider)} · ${r.model}` : null });
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "Couldn’t send."); setDraft(content);
+      if (e instanceof ApiError && e.data.posted === true) {
+        // Buddy couldn't answer, but the student's own message already reached the room:
+        // don't hand the text back (re-sending would post it twice).
+        setErr(`${e.message} Your message was posted to the room.`);
+      } else {
+        setErr(e instanceof Error ? e.message : "Couldn’t send."); setDraft(content);
+      }
     } finally { setBusy(false); }
   }
 
@@ -98,7 +133,7 @@ export default function RoomPage() {
       <div className="page-head">
         <div>
           <h1>Study Room</h1>
-          <p>Study with friends in one live chat. Buddy remembers what everyone says here, and quietly uses what it knows about <em>you</em> — never revealing it to the room.</p>
+          <p>Study with friends in one live chat. Buddy remembers what everyone says here, and quietly uses what it knows about <em>you</em> but never reveals it to the room.</p>
         </div>
       </div>
 
@@ -123,6 +158,11 @@ export default function RoomPage() {
           <div className="card roombar">
             <div className="row gap wrap">
               <span className={`live ${live ? "on" : ""}`}><i /> {live ? "Live" : "Connecting…"}</span>
+              <div className="seg" role="group" aria-label="AI model for Buddy's replies">
+                {PROVIDERS.map((pr) => (
+                  <button key={pr.id} className={provider === pr.id ? "on" : ""} onClick={() => setProvider(pr.id)} title="Which AI writes Buddy's replies. You can switch anytime — Buddy's memory lives on Walrus, not inside either one.">{pr.label}</button>
+                ))}
+              </div>
               <button className="chip mint" title="Copy room code to share" onClick={async () => { try { await navigator.clipboard.writeText(roomId); setCopied(true); setTimeout(() => setCopied(false), 1400); } catch { /* blocked */ } }}>
                 {copied ? <Check size={13} /> : <Copy size={13} />} {roomId}
               </button>
@@ -136,21 +176,18 @@ export default function RoomPage() {
             </div>
           </div>
 
-          {recap.length > 0 && (
-            <details className="card recap">
-              <summary>Earlier in this room · recalled from Walrus memory ({recap.length})</summary>
-              <ul>{recap.map((t, i) => <li key={i}>{t}</li>)}</ul>
-            </details>
-          )}
-
           <div className="rthread">
             {msgs.length === 0 && <div className="empty">Nobody has spoken yet. <strong>Send</strong> talks to your friends; <strong>Ask Buddy</strong> also brings the tutor in.</div>}
-            {msgs.map((m) => {
-              const me = m.kind === "user" && m.speakerId === myId;
+            {historyCount > 0 && <div className="tiny" style={{ textAlign: "center", margin: "2px 0 4px" }}>— earlier in this room, recalled from Walrus —</div>}
+            {msgs.map((m, i) => {
+              const me = m.kind === "user" && (m.speakerId ? m.speakerId === myId : m.displayName === profile.name);
               return (
-                <div key={m.id} className={`rmsg ${me ? "me" : ""} ${m.kind === "agent" ? "agent" : ""}`}>
-                  <span className="who">{m.kind === "agent" ? `Study Buddy → ${m.addressedToName ?? "everyone"}` : me ? "You" : m.displayName}</span>
-                  <div className="rbubble">{m.kind === "agent" ? <Markdown>{m.content}</Markdown> : m.content}</div>
+                <div key={m.id}>
+                  <div className={`rmsg ${me ? "me" : ""} ${m.kind === "agent" ? "agent" : ""}`}>
+                    <span className="who">{m.kind === "agent" ? `Study Buddy → ${m.addressedToName ?? "everyone"}` : me ? "You" : m.displayName}</span>
+                    <div className="rbubble">{m.kind === "agent" ? <Markdown>{m.content}</Markdown> : m.content}</div>
+                  </div>
+                  {historyCount > 0 && i === historyCount - 1 && <div className="tiny" style={{ textAlign: "center", margin: "6px 0" }}>— you’re caught up —</div>}
                 </div>
               );
             })}
@@ -161,7 +198,9 @@ export default function RoomPage() {
           {err && <div className="banner coral">{err}</div>}
           {mine && (
             <div className="private-note">
-              <button className="chip amber" onClick={() => setShowMine((v) => !v)}><Lock size={12} /> Buddy used {mine.used.length} private note{mine.used.length === 1 ? "" : "s"} about you</button>
+              <button className="chip amber" onClick={() => setShowMine((v) => !v)}><Lock size={12} /> used {mine.used.length} private note{mine.used.length === 1 ? "" : "s"} about you</button>
+              {mine.learned.length > 0 && <span className="chip mint"><Gem size={12} /> learned {mine.learned.length} new {mine.learned.length === 1 ? "fact" : "facts"}</span>}
+              {mine.via && <span className="chip"><Sparkles size={12} /> answered via {mine.via}</span>}
               <span className="tiny">only you can see this{mine.fellBack ? " · reply was replaced by the privacy guard" : ""}</span>
               {showMine && mine.used.length > 0 && <ul className="drawer" style={{ width: "100%" }}>{mine.used.map((u, i) => <li key={i}>{u}</li>)}</ul>}
             </div>

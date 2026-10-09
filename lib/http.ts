@@ -28,3 +28,21 @@ export async function parse<S extends z.ZodType>(req: Request, schema: S): Promi
 }
 
 export const errMsg = (e: unknown) => (e instanceof Error ? e.message : String(e));
+
+/**
+ * Resolves with `promise`'s value, or with `fallback` if it hasn't settled in
+ * `ms`. For slow-but-optional work (a Walrus recall on a cold start) where the
+ * right move is "carry on without it" rather than leave the student staring
+ * at a spinner. The underlying work is not cancelled — it just can no longer
+ * hold the response up — and a late failure is swallowed so it can't surface
+ * as an unhandled rejection.
+ */
+export function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise<T>((resolve) => {
+    const timer = setTimeout(() => resolve(fallback), ms);
+    promise.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      () => { clearTimeout(timer); resolve(fallback); }
+    );
+  });
+}

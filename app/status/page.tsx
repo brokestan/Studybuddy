@@ -5,14 +5,50 @@ import { RefreshCw } from "lucide-react";
 import { useProfile } from "@/components/ProfileProvider";
 import { postJson } from "@/lib/client/api";
 
+interface Candidates {
+  ranked: string[];
+  tryOrder: string[];
+  cooling: { model: string; secondsLeft: number }[];
+  verified: boolean;
+}
+interface Usage { ok: boolean; privateProfiles?: number; studyRooms?: number; privateMemories?: number; roomMemories?: number; other?: number; truncated?: boolean; error?: string }
+
 interface Status {
   time: string;
   mock: boolean;
   devTests: boolean;
   env: Record<string, boolean | string>;
-  llm?: { ok: boolean; model?: string; verified?: boolean; modelsListed?: number; error?: string };
+  llm?: { ok: boolean; model?: string; verified?: boolean; candidates?: Candidates; error?: string };
+  gemini?: { ok: boolean; model?: string; verified?: boolean; candidates?: Candidates; error?: string };
+  usage?: Usage;
   memwal?: { ok: boolean; totalMemories?: number | null; target?: number; error?: string };
   realtime?: { ok: boolean; status?: number; error?: string };
+}
+
+/** The fallback order for one provider: what gets tried, in order, and what is cooling down right now. */
+function Fallbacks({ c, envName }: { c?: Candidates; envName: string }) {
+  if (!c) return null;
+  const cooling = new Map(c.cooling.map((x) => [x.model, x.secondsLeft]));
+  return (
+    <>
+      <br />
+      <span className="tiny">
+        If a model is busy or retired, requests move down this list inside the same request (most-preferred first):
+      </span>
+      <ol className="tiny" style={{ margin: "6px 0 0", paddingLeft: 20 }}>
+        {c.ranked.map((m) => (
+          <li key={m}>
+            <code>{m}</code>
+            {cooling.has(m) && <span className="chip coral" style={{ marginLeft: 8 }}>cooling down · {cooling.get(m)}s left</span>}
+          </li>
+        ))}
+      </ol>
+      <span className="tiny">
+        {c.verified ? "" : "Couldn’t reach the provider’s model list, so this is only the configured/last-resort list. "}
+        To choose or reorder, set <code>{envName}</code> in Vercel to a comma-separated list (e.g. <code>a,b</code>) and redeploy.
+      </span>
+    </>
+  );
 }
 
 function Row({ ok, title, children }: { ok: boolean; title: string; children: React.ReactNode }) {
@@ -62,10 +98,15 @@ export default function StatusPage() {
       {loading && !s && [0, 1, 2].map((i) => <div key={i} className="skeleton" style={{ height: 76, marginBottom: 10 }} />)}
       {s && (
         <div className="checks">
-          <Row ok={Boolean(s.llm?.ok)} title="AI model (Groq)">
+          <Row ok={Boolean(s.llm?.ok)} title="AI model — Groq (the default; always used for quiz and flashcards)">
             {s.llm?.ok
-              ? <>Working. Using <code>{s.llm.model}</code>{s.llm.verified ? " (confirmed live on Groq)" : " (couldn’t verify the model list, will retry)"} · {s.llm.modelsListed} models listed. Picked automatically, so retired models can’t break the app.</>
+              ? <>Working. Trying <code>{s.llm.model}</code> first{s.llm.verified ? " (confirmed live on Groq)" : " (couldn’t verify the model list, will retry)"} · {s.llm.candidates?.ranked.length ?? "?"} eligible models. Picked automatically, so retired or busy models can’t break the app.<Fallbacks c={s.llm.candidates} envName="GROQ_MODEL" /></>
               : <>{s.llm?.error ?? "Not working."} → set <code>GROQ_API_KEY</code> in Vercel (free key at console.groq.com/keys), then redeploy.</>}
+          </Row>
+          <Row ok={Boolean(s.gemini?.ok)} title="AI model — Gemini (optional second option in the Tutor and Study Room switchers)">
+            {s.gemini?.ok
+              ? <>Working. Trying <code>{s.gemini.model}</code> first{s.gemini.verified ? " (confirmed live on Gemini)" : " (couldn’t verify the model list, will retry)"} · {s.gemini.candidates?.ranked.length ?? "?"} eligible models. Gemini only falls back to other Gemini models — never silently to Groq.<Fallbacks c={s.gemini.candidates} envName="GEMINI_MODEL" /></>
+              : <>{s.gemini?.error ?? "Not configured."} → optional: set <code>GEMINI_API_KEY</code> in Vercel (free key at aistudio.google.com), then redeploy. The Tutor works fine on Groq alone without this.</>}
           </Row>
           <Row ok={Boolean(s.memwal?.ok)} title="Walrus Memory (mainnet)">
             {s.memwal?.ok
@@ -75,6 +116,14 @@ export default function StatusPage() {
           <Row ok={Boolean(s.realtime?.ok)} title="Live Study Room (Supabase Broadcast — stores nothing)">
             {s.realtime?.ok ? <>Live wire is up (HTTP {s.realtime.status}).</> : <>{s.realtime?.error ?? `Rejected (HTTP ${s.realtime?.status}).`} → set <code>NEXT_PUBLIC_SUPABASE_URL</code> and <code>NEXT_PUBLIC_SUPABASE_ANON_KEY</code> in Vercel, then redeploy. Only the Study Room needs this.</>}
           </Row>
+          {s.usage && (
+            <Row ok={s.usage.ok} title="Usage on Walrus (counts only)">
+              {s.usage.ok
+                ? <><strong>{s.usage.privateProfiles}</strong> memory {s.usage.privateProfiles === 1 ? "key" : "keys"} and <strong>{s.usage.studyRooms}</strong> study {s.usage.studyRooms === 1 ? "room" : "rooms"} in use ({s.usage.privateMemories} private + {s.usage.roomMemories} room memories stored){s.usage.other ? <> · {s.usage.other} other namespace{s.usage.other === 1 ? "" : "s"}</> : null}{s.usage.truncated ? " · (very large account — count is partial)" : ""}. Only numbers are shown; no key or room code is ever revealed.</>
+                : <>{s.usage.error}</>}
+            </Row>
+          )}
+          {!s.devTests && <p className="tiny" style={{ margin: "0 2px" }}>Set <code>ENABLE_DEV_TESTS=true</code> in Vercel to also show usage counts and the isolation-proof button.</p>}
           <div className="card" style={{ padding: 18 }}>
             <h3 style={{ margin: "0 0 10px", fontSize: 16 }}>Environment variables seen by the server</h3>
             <div className="chips">

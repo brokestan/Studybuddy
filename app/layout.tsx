@@ -3,8 +3,8 @@ import "@fontsource-variable/bricolage-grotesque";
 import "@fontsource-variable/dm-sans";
 import "./globals.css";
 import { ProfileProvider } from "@/components/ProfileProvider";
+import { TutorSessionProvider } from "@/components/TutorSessionProvider";
 import { AppShell } from "@/components/AppShell";
-import { Analytics } from "@vercel/analytics/next";
 
 export const metadata: Metadata = {
   title: "Study Buddy — the tutor that remembers you",
@@ -23,9 +23,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       </head>
       <body>
         <ProfileProvider>
-          <AppShell>{children}</AppShell>
+          <TutorSessionProvider>
+            <AppShell>{children}</AppShell>
+          </TutorSessionProvider>
         </ProfileProvider>
-        <Analytics />
       </body>
     </html>
   );

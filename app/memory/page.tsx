@@ -1,18 +1,17 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Brain, RefreshCw, ShieldCheck } from "lucide-react";
+import { Brain, BookOpen, RefreshCw, ShieldCheck } from "lucide-react";
 import { useProfile } from "@/components/ProfileProvider";
 import { postJson, shortBlob, timeAgo, type NoteView } from "@/lib/client/api";
 
 interface Lens {
   ok: boolean;
   recent: NoteView[];
+  subjects: { subject: string; topics: string[] }[];
   categories: { id: string; title: string; items: NoteView[] }[];
   stats: { mine: number | null; total: number } | null;
 }
-const TARGET = 10;
-
 function Item({ n }: { n: NoteView }) {
   return (
     <div className="mem">
@@ -55,10 +54,7 @@ export default function MemoryPage() {
 
       <div className="tiles">
         <div className="card tile"><div className="n">{loading && !lens ? "–" : mine}</div><div className="t">memories about you on Walrus</div></div>
-        <div className="card tile">
-          <div className="n">{loading && !lens ? "–" : total}</div><div className="t">memories on this whole app account (hackathon target: {TARGET}+)</div>
-          <div className="bar"><i style={{ width: `${Math.min(100, (total / TARGET) * 100)}%` }} /></div>
-        </div>
+        <div className="card tile"><div className="n">{loading && !lens ? "–" : total}</div><div className="t">memories on this whole app account</div></div>
         <div className="card tile"><div className="t" style={{ marginTop: 0 }}><ShieldCheck size={18} style={{ color: "var(--accent)" }} /><br />Stored encrypted on Walrus mainnet. Only your memory key opens this folder.</div></div>
       </div>
 
@@ -66,6 +62,23 @@ export default function MemoryPage() {
 
       {lens && (
         <>
+          <div className="sect">
+            <h2><BookOpen size={16} style={{ color: "var(--accent)" }} /> Subjects &amp; topics</h2>
+            {lens.subjects.length ? (
+              <div className="stack" style={{ gap: 10 }}>
+                {lens.subjects.map((s) => (
+                  <div key={s.subject} className="mem">
+                    <strong>{s.subject}</strong>
+                    <div className="chips" style={{ marginTop: 8 }}>
+                      {s.topics.map((t) => <span key={t} className="chip amber">{t}</span>)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="empty">Nothing here yet — every real topic you cover in the Tutor (or in a Study Room, even without tagging Buddy) gets logged here precisely, not just guessed from freeform notes.</div>
+            )}
+          </div>
           {lens.categories.map((c) => (
             <div key={c.id} className="sect">
               <h2><Brain size={16} style={{ color: "var(--amber)" }} /> {c.title}</h2>

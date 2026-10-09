@@ -1,34 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowUp, Brain } from "lucide-react";
+import { useCallback, useEffect, useRef } from "react";
+import { ArrowUp, BookOpen, Brain, RotateCcw } from "lucide-react";
 import { useProfile } from "@/components/ProfileProvider";
+import { useTutorSession, type TutorMsg, type TutorOpener } from "@/components/TutorSessionProvider";
 import { Markdown } from "@/components/Markdown";
-import { MemoryTrace, type Step } from "@/components/MemoryTrace";
+import { MemoryTrace } from "@/components/MemoryTrace";
 import { Logo } from "@/components/Logo";
-import { postJson, streamTutor, timeAgo, type NoteView, type SourceView } from "@/lib/client/api";
+import { postJson, streamTutor, timeAgo, type Provider } from "@/lib/client/api";
 import type { Level } from "@/lib/prompts";
-
-interface Msg {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  recalled?: NoteView[];
-  sources?: SourceView[];
-  learned?: string[];
-  memoryOk?: boolean;
-  sealError?: string;
-  step?: Step;
-  streaming?: boolean;
-  error?: string;
-}
-interface Opener {
-  returning: boolean;
-  greeting: string;
-  suggestions: string[];
-  notes: NoteView[];
-  memoryOk: boolean;
-}
 
 const LEVELS: { id: Level; label: string }[] = [
   { id: "eli5", label: "Like I’m 8" },
@@ -37,26 +17,36 @@ const LEVELS: { id: Level; label: string }[] = [
   { id: "college", label: "College" },
   { id: "expert", label: "Expert" },
 ];
+const PROVIDERS: { id: Provider; label: string }[] = [
+  { id: "groq", label: "Groq (Qwen)" },
+  { id: "gemini", label: "Gemini" },
+];
 const QUICK = ["Explain that more simply", "Give me a practice question", "Summarize what we covered", "What are my weak spots?"];
 
 export default function TutorPage() {
   const { profile } = useProfile();
-  const [msgs, setMsgs] = useState<Msg[]>([]);
-  const [input, setInput] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [level, setLevel] = useState<Level>("high");
-  const [opener, setOpener] = useState<Opener | null>(null);
-  const [openerErr, setOpenerErr] = useState(false);
+  const {
+    msgs, setMsgs, opener, setOpener, openerErr, setOpenerErr, openerFetched, markOpenerFetched,
+    level, setLevel, provider, setProvider, busy, setBusy, input, setInput, resetSession,
+  } = useTutorSession();
   const endRef = useRef<HTMLDivElement>(null);
   const taRef = useRef<HTMLTextAreaElement>(null);
 
-  // Personalized greeting built from what Walrus remembers.
+  // Personalized greeting built from what Walrus remembers. Only runs once per
+  // session (openerFetched) — coming back from Quiz/Cards/Room/Memory/Status
+  // must not re-fetch and overwrite an already-underway conversation.
   useEffect(() => {
-    if (!profile) return;
+    if (!profile || openerFetched || msgs.length > 0) return;
     let alive = true;
-    postJson<Opener>("/api/tutor/open", { code: profile.code, name: profile.name })
+    markOpenerFetched();
+    // The server caps its own waits, but a cold start can delay the request
+    // itself. After 25s give up on the personalised greeting and show the plain one.
+    const ctl = new AbortController();
+    const giveUp = setTimeout(() => ctl.abort(), 25_000);
+    postJson<TutorOpener>("/api/tutor/open", { code: profile.code, name: profile.name }, ctl.signal)
       .then((o) => alive && setOpener(o))
-      .catch(() => alive && setOpenerErr(true));
+      .catch(() => alive && setOpenerErr(true))
+      .finally(() => clearTimeout(giveUp));
     try {
       const pre = sessionStorage.getItem("sb.prefill");
       if (pre) {
@@ -65,14 +55,11 @@ export default function TutorPage() {
       }
     } catch { /* ignore */ }
     return () => { alive = false; };
-  }, [profile]);
+  }, [profile, openerFetched, msgs.length, markOpenerFetched, setOpener, setOpenerErr, setInput]);
 
   useEffect(() => {
-    endRef.current?.scrollIntoView({ block: "end", behavior: "smooth" });
+    endRef.current?.scrollIntoView({ block: "end" });
   }, [msgs.length]);
-  useEffect(() => {
-    if (busy) endRef.current?.scrollIntoView({ block: "end" });
-  }, [msgs, busy]);
 
   const send = useCallback(
     async (text: string) => {
@@ -84,14 +71,15 @@ export default function TutorPage() {
       setInput("");
       if (taRef.current) taRef.current.style.height = "auto";
       setBusy(true);
-      const patch = (f: (m: Msg) => Msg) => setMsgs((p) => p.map((m) => (m.id === aid ? f(m) : m)));
+      const patch = (f: (m: TutorMsg) => TutorMsg) => setMsgs((p) => p.map((m) => (m.id === aid ? f(m) : m)));
       try {
-        await streamTutor({ code: profile.code, name: profile.name, message, history, level }, (ev) => {
+        await streamTutor({ code: profile.code, name: profile.name, message, history, level, provider }, (ev) => {
           switch (ev.type) {
             case "status": patch((m) => ({ ...m, step: ev.step })); break;
-            case "meta": patch((m) => ({ ...m, recalled: ev.recalled, sources: ev.sources, memoryOk: ev.memoryOk })); break;
+            case "model": patch((m) => ({ ...m, provider: ev.provider, model: ev.model })); break;
+            case "meta": patch((m) => ({ ...m, recalled: ev.recalled, sources: ev.sources, memoryOk: ev.memoryOk, provider: ev.provider, model: ev.model })); break;
             case "token": patch((m) => ({ ...m, content: m.content + ev.t })); break;
-            case "done": patch((m) => ({ ...m, learned: ev.learned, sealError: ev.sealError, step: null, streaming: false })); break;
+            case "done": patch((m) => ({ ...m, learned: ev.learned, sealError: ev.sealError, topic: ev.topic, step: null, streaming: false })); break;
             case "error": patch((m) => ({ ...m, error: ev.message, step: null, streaming: false })); break;
           }
         });
@@ -102,10 +90,13 @@ export default function TutorPage() {
         setBusy(false);
       }
     },
-    [profile, msgs, busy, level]
+    [profile, msgs, busy, level, provider, setMsgs, setInput, setBusy]
   );
 
   const empty = msgs.length === 0;
+  // Did the AI actually change partway through this conversation? Shown as a
+  // small note so the "memory survives a model swap" proof is unmissable.
+  const providersUsed = new Set(msgs.filter((m) => m.role === "assistant" && m.provider).map((m) => m.provider));
 
   return (
     <div className="page">
@@ -114,12 +105,29 @@ export default function TutorPage() {
           <h1>Tutor</h1>
           <p>Ask anything. Buddy explains it your way, and remembers what you learn.</p>
         </div>
-        <div className="seg" role="group" aria-label="Explanation level">
-          {LEVELS.map((l) => (
-            <button key={l.id} className={level === l.id ? "on" : ""} onClick={() => setLevel(l.id)}>{l.label}</button>
-          ))}
+        <div className="row gap wrap" style={{ justifyContent: "flex-end" }}>
+          {!empty && (
+            <button className="btn ghost" onClick={resetSession} title="Clear this chat window (your memory on Walrus is untouched)">
+              <RotateCcw size={15} /> New chat
+            </button>
+          )}
+          <div className="seg" role="group" aria-label="AI model">
+            {PROVIDERS.map((pr) => (
+              <button key={pr.id} className={provider === pr.id ? "on" : ""} onClick={() => setProvider(pr.id)} title="You can switch this anytime, even mid-conversation — your Walrus memory doesn't belong to either one">{pr.label}</button>
+            ))}
+          </div>
+          <div className="seg" role="group" aria-label="Explanation level">
+            {LEVELS.map((l) => (
+              <button key={l.id} className={level === l.id ? "on" : ""} onClick={() => setLevel(l.id)}>{l.label}</button>
+            ))}
+          </div>
         </div>
       </div>
+      {providersUsed.size > 1 && (
+        <div className="banner mint" style={{ marginBottom: 14 }}>
+          <Brain size={16} /> This conversation has used more than one AI model — notice Buddy still remembers everything, because that memory lives on Walrus, not inside Groq or Gemini.
+        </div>
+      )}
 
       <div className="thread">
         {empty && (
@@ -172,6 +180,7 @@ export default function TutorPage() {
                   <div className="skeleton" style={{ height: 18, width: 220 }} />
                 ) : null}
                 {m.error && <div className="banner coral">{m.error}</div>}
+                {m.model && !m.error && <div className="tiny" style={{ marginTop: 6 }}>via {m.model}</div>}
                 {m.sources && m.sources.length > 0 && (
                   <div className="sources">
                     {m.sources.map((s, i) => (
@@ -180,6 +189,11 @@ export default function TutorPage() {
                   </div>
                 )}
                 {!m.error && <MemoryTrace recalled={m.recalled} learned={m.learned} step={m.step} memoryOk={m.memoryOk ?? true} sealError={m.sealError} />}
+                {m.topic && (
+                  <div className="chips" style={{ marginTop: 8 }}>
+                    <span className="chip mint"><BookOpen size={12} /> logged under {m.topic.subject} — {m.topic.topic}</span>
+                  </div>
+                )}
               </div>
             </div>
           )

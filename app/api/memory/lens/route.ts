@@ -1,5 +1,6 @@
 import { recallSafe, stats, type Note } from "@/lib/memory";
 import { privateNamespace } from "@/lib/identity";
+import { parseTopicMemory, groupBySubject } from "@/lib/topics";
 import { LensBody } from "@/lib/schemas";
 import { limited, parse, json } from "@/lib/http";
 
@@ -24,8 +25,13 @@ export async function POST(req: Request) {
   if (!p.ok) return p.res;
   const ns = privateNamespace(p.data.code);
 
-  const [recent, ...cats] = await Promise.all([
+  const [recent, subjectMem, ...cats] = await Promise.all([
     recallSafe(ns, "study session learning", { limit: 12, sort: "recent" }),
+    // Precise subject/topic records (lib/topics.ts) — written by the Tutor
+    // after every real exchange, and the same visible proof that group-study
+    // in the Room (see roomAgent.ts's solo private-learn path) and quiz/card
+    // results all land in this one place, not four separate silos.
+    recallSafe(ns, "studied subject topic", { limit: 60, sort: "recent" }),
     ...CATS.map((c) => recallSafe(ns, c.q, { limit: 6, maxDistance: 0.75 })),
   ]);
   const st = await stats(ns).catch(() => null);
@@ -36,9 +42,17 @@ export async function POST(req: Request) {
     title: c.title,
     items: cats[i].notes.filter((n) => !seen.has(n.blobId) && seen.add(n.blobId)).map(view),
   }));
+
+  // groupBySubject expects oldest-first for a sensible topic order within
+  // each subject; recall with sort:"recent" comes back newest-first.
+  const subjects = groupBySubject(
+    [...subjectMem.notes].reverse().map((n) => parseTopicMemory(n.text)).filter((x): x is NonNullable<typeof x> => x !== null)
+  );
+
   return json({
-    ok: recent.ok && cats.every((c) => c.ok),
+    ok: recent.ok && subjectMem.ok && cats.every((c) => c.ok),
     recent: recent.notes.map(view),
+    subjects,
     categories,
     stats: st,
   });

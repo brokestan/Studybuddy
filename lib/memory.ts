@@ -1,5 +1,6 @@
 import "server-only";
 import { MemWal, MemWalMock } from "@mysten-incubation/memwal";
+import { summarizeNamespaces, type NamespaceSummary } from "./namespaceStats";
 
 // Every durable thing this app remembers goes through this file, and every
 // byte of it lives on Walrus (mainnet relayer). There is no other database.
@@ -62,6 +63,17 @@ const toNote = (r: { blob_id: string; text: string; distance: number; created_at
   distance: r.distance,
 });
 
+export type RecallResult = { notes: Note[]; ok: boolean; error?: string };
+
+/**
+ * How long a route waits on a Walrus recall before carrying on without it.
+ * A cold-started function or a slow relayer should cost the student a few
+ * seconds of "no memory this turn", not an endless spinner.
+ */
+export const recallTimeoutMs = () => Number(process.env.RECALL_TIMEOUT_MS) || 6000; // env override: optional tuning / tests
+/** What a timed-out recall looks like to callers: the same shape as a failed one, so existing "memory unreachable" paths just work. */
+export const recallTimedOut = (): RecallResult => ({ notes: [], ok: false, error: "Walrus took too long to respond." });
+
 /** Never throws: a memory outage must not take the whole tutor down. */
 export async function recallSafe(
   namespace: string,
@@ -103,6 +115,30 @@ export async function stats(namespace?: string): Promise<{ mine: number | null; 
     cursor = r.next_cursor;
   }
   return { mine: namespace ? mine ?? 0 : null, total };
+}
+
+/** Pages through every namespace on the account. `truncated` = there were more than we were willing to read. */
+async function listAllNamespaces(): Promise<{ namespaces: { name: string; memory_count: number }[]; truncated: boolean }> {
+  const namespaces: { name: string; memory_count: number }[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < 6; page++) {
+    const r = await client().listNamespaces({ cursor, limit: 500 });
+    for (const n of r.namespaces) namespaces.push({ name: n.name, memory_count: n.memory_count });
+    if (!r.has_more || !r.next_cursor) return { namespaces, truncated: false };
+    cursor = r.next_cursor;
+  }
+  return { namespaces, truncated: true };
+}
+
+/**
+ * How many private memory keys and study rooms have ever stored something.
+ * COUNTS ONLY — see lib/namespaceStats.ts for why a name must never leave
+ * this function (private profiles are one-way hashes, but a room's name is
+ * its join code).
+ */
+export async function namespaceBreakdown(): Promise<NamespaceSummary & { truncated: boolean }> {
+  const { namespaces, truncated } = await listAllNamespaces();
+  return { ...summarizeNamespaces(namespaces), truncated };
 }
 
 export const health = () => client().health();
