@@ -39,7 +39,7 @@ export function Onboarding() {
           <>
             <h1 className="hero">A tutor that <em>actually remembers</em> you.</h1>
             <p className="lead">
-              Study Buddy keeps your goals, weak spots and progress in encrypted memory on Walrus — so it picks up where you left off, on any device, and
+              Study Buddy keeps your goals, weak spots and progress in encrypted memory on Walrus, so it picks up where you left off, on any device, and
               can even study with your friends without ever spilling your private notes.
             </p>
             <div className="stack">
