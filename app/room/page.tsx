@@ -133,7 +133,7 @@ export default function RoomPage() {
       <div className="page-head">
         <div>
           <h1>Study Room</h1>
-          <p>Study with friends in one live chat. Buddy remembers what everyone says here, and quietly uses what it knows about <em>you</em> — never revealing it to the room.</p>
+          <p>Study with friends in one live chat. Buddy remembers what everyone says here, and quietly uses what it knows about <em>you</em> but never reveals it to the room.</p>
         </div>
       </div>
 
