@@ -1,6 +1,5 @@
-import { listModels, resolveModel } from "@/lib/llm";
-import { listGeminiModels, resolveGeminiModel } from "@/lib/gemini";
-import { health, isMock, memwalEnv, stats } from "@/lib/memory";
+import { candidatesFor } from "@/lib/ai";
+import { health, isMock, memwalEnv, namespaceBreakdown, stats } from "@/lib/memory";
 import { broadcast, realtimeConfigured } from "@/lib/realtime";
 import { limited, json, errMsg } from "@/lib/http";
 
@@ -29,10 +28,13 @@ export async function GET(req: Request) {
     },
   };
 
+  // `candidates` is the whole fallback picture: the ranked order requests walk
+  // through, what is cooling down (and for how long), and what is tried first
+  // right now. Choosing models is done with the comma-separated GROQ_MODEL /
+  // GEMINI_MODEL env vars (an ordered preference list) — this page only shows.
   try {
-    const r = await resolveModel(true);
-    const all = await listModels().catch(() => []);
-    out.llm = { ok: true, model: r.model, verified: r.verified, modelsListed: all.length };
+    const c = await candidatesFor("groq", true);
+    out.llm = { ok: true, model: c.tryOrder[0], verified: c.verified, candidates: c };
   } catch (e) {
     out.llm = { ok: false, error: errMsg(e) };
   }
@@ -42,9 +44,8 @@ export async function GET(req: Request) {
   // option, not a requirement.
   if (process.env.GEMINI_API_KEY) {
     try {
-      const r = await resolveGeminiModel(true);
-      const all = await listGeminiModels().catch(() => []);
-      out.gemini = { ok: true, model: r.model, verified: r.verified, modelsListed: all.length };
+      const c = await candidatesFor("gemini", true);
+      out.gemini = { ok: true, model: c.tryOrder[0], verified: c.verified, candidates: c };
     } catch (e) {
       out.gemini = { ok: false, error: errMsg(e) };
     }
@@ -58,6 +59,18 @@ export async function GET(req: Request) {
     out.memwal = { ok: true, health: h, totalMemories: s?.total ?? null, target: 10 };
   } catch (e) {
     out.memwal = { ok: false, error: errMsg(e) };
+  }
+
+  // Usage analytics (how many memory keys / study rooms have ever stored
+  // something). COUNTS ONLY — names are never returned (see lib/namespaceStats.ts).
+  // Behind ENABLE_DEV_TESTS like the other dev-only tooling: /api/status has no
+  // login, and this is an extra pass over the account's namespaces.
+  if (process.env.ENABLE_DEV_TESTS === "true") {
+    try {
+      out.usage = { ok: true, ...(await namespaceBreakdown()) };
+    } catch (e) {
+      out.usage = { ok: false, error: errMsg(e) };
+    }
   }
 
   if (!realtimeConfigured()) {

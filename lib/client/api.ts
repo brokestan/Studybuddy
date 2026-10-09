@@ -1,9 +1,16 @@
 // Browser-only fetch helpers.
 
+/** An Error that also carries the server's JSON body, for callers that need more than the message. */
+export class ApiError extends Error {
+  constructor(message: string, public status: number, public data: Record<string, unknown>) {
+    super(message);
+  }
+}
+
 export async function postJson<T>(url: string, body: unknown, signal?: AbortSignal): Promise<T> {
   const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body), signal });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error((data as { error?: string }).error ?? `Request failed (${res.status})`);
+  if (!res.ok) throw new ApiError((data as { error?: string }).error ?? `Request failed (${res.status})`, res.status, data as Record<string, unknown>);
   return data as T;
 }
 
@@ -20,6 +27,7 @@ export type Provider = "groq" | "gemini";
 export type TutorEvent =
   | { type: "status"; step: "recall" | "think" | "seal" }
   | { type: "meta"; memoryOk: boolean; recalled: NoteView[]; sources: SourceView[]; provider: Provider; model: string }
+  | { type: "model"; provider: Provider; model: string } // which model REALLY answered (may differ from `meta` after a fallback)
   | { type: "token"; t: string }
   | { type: "done"; learned: string[]; sealError?: string; topic: { subject: string; topic: string } | null }
   | { type: "error"; message: string };

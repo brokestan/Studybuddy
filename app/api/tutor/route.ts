@@ -1,6 +1,6 @@
 import { chatJson, type Msg } from "@/lib/llm";
-import { streamAnswer, currentModelLabel, type Provider } from "@/lib/ai";
-import { recallSafe, learn, remember } from "@/lib/memory";
+import { openAnswerStream, currentModelLabel, modelLabel, type Provider } from "@/lib/ai";
+import { recallSafe, learn, remember, recallTimeoutMs, recallTimedOut } from "@/lib/memory";
 import { privateNamespace } from "@/lib/identity";
 import { tutorSystemPrompt, topicTagPrompt } from "@/lib/prompts";
 import { formatTopicMemory, groupBySubject, parseTopicMemory, summarizeSubjects } from "@/lib/topics";
@@ -8,7 +8,7 @@ import { extractJson } from "@/lib/quizJson";
 import { shouldGround, groundOn } from "@/lib/wiki";
 import { ndjson } from "@/lib/sse";
 import { TutorBody } from "@/lib/schemas";
-import { limited, parse, errMsg } from "@/lib/http";
+import { limited, parse, errMsg, withTimeout } from "@/lib/http";
 import { z } from "zod";
 
 export const runtime = "nodejs";
@@ -32,12 +32,14 @@ export async function POST(req: Request) {
       const send = (o: unknown) => c.enqueue(ndjson(o));
       try {
         send({ type: "status", step: "recall" });
-        const [mem, subjectMem, sources, modelLabel] = await Promise.all([
-          recallSafe(ns, message, { limit: 6, maxDistance: 0.8 }),
+        const [mem, subjectMem, sources, initialLabel] = await Promise.all([
+          // A slow/cold Walrus recall must not hold the answer hostage: after
+          // ~6s we carry on without it (the UI then shows "memory unreachable").
+          withTimeout(recallSafe(ns, message, { limit: 6, maxDistance: 0.8 }), recallTimeoutMs(), recallTimedOut()),
           // A broad, permissive recall of the precise subject/topic records
           // (see lib/topics.ts) — separate from freeform notes above, so
           // continuity doesn't depend on semantic luck.
-          recallSafe(ns, "studied subject topic", { limit: 30, sort: "recent" }),
+          withTimeout(recallSafe(ns, "studied subject topic", { limit: 30, sort: "recent" }), recallTimeoutMs(), recallTimedOut()),
           shouldGround(message) ? groundOn(message) : Promise.resolve([]),
           currentModelLabel(provider),
         ]);
@@ -50,7 +52,7 @@ export async function POST(req: Request) {
           recalled: mem.notes.map((n) => ({ text: n.text, blobId: n.blobId, createdAt: n.createdAt })),
           sources: sources.map((s) => ({ title: s.title, url: s.url })),
           provider,
-          model: modelLabel,
+          model: initialLabel, // best guess; a "model" event below corrects it if a fallback answered
         });
 
         send({ type: "status", step: "think" });
@@ -59,8 +61,13 @@ export async function POST(req: Request) {
           ...history.slice(-12),
           { role: "user", content: message },
         ];
+        // Connect first (this is where within-provider fallback happens), then
+        // tell the browser which model REALLY answered — it can differ from the
+        // label sent in `meta` if the top candidate was busy.
+        const { model: answeredBy, stream: answer } = await openAnswerStream(provider as Provider, messages, { maxTokens: 900 });
+        send({ type: "model", provider, model: modelLabel(provider as Provider, answeredBy) });
         let full = "";
-        for await (const t of streamAnswer(provider as Provider, messages, { maxTokens: 900 })) {
+        for await (const t of answer) {
           full += t;
           send({ type: "token", t });
         }

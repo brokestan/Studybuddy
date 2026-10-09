@@ -41,6 +41,8 @@ export const RoomMessageBody = z.object({
   name,
   content: z.string().trim().min(1).max(1000),
   askBuddy: z.boolean().default(false),
+  // Same two-backend switch the Tutor has. Fallback only ever happens WITHIN the chosen provider.
+  provider: z.enum(["groq", "gemini"]).default("groq"),
   recentLines: z
     .array(z.object({ displayName: z.string().max(30), kind: z.enum(["user", "agent"]), content: z.string().max(300) }))
     .max(8)

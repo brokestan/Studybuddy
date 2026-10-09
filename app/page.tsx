@@ -39,9 +39,14 @@ export default function TutorPage() {
     if (!profile || openerFetched || msgs.length > 0) return;
     let alive = true;
     markOpenerFetched();
-    postJson<TutorOpener>("/api/tutor/open", { code: profile.code, name: profile.name })
+    // The server caps its own waits, but a cold start can delay the request
+    // itself. After 25s give up on the personalised greeting and show the plain one.
+    const ctl = new AbortController();
+    const giveUp = setTimeout(() => ctl.abort(), 25_000);
+    postJson<TutorOpener>("/api/tutor/open", { code: profile.code, name: profile.name }, ctl.signal)
       .then((o) => alive && setOpener(o))
-      .catch(() => alive && setOpenerErr(true));
+      .catch(() => alive && setOpenerErr(true))
+      .finally(() => clearTimeout(giveUp));
     try {
       const pre = sessionStorage.getItem("sb.prefill");
       if (pre) {
@@ -71,6 +76,7 @@ export default function TutorPage() {
         await streamTutor({ code: profile.code, name: profile.name, message, history, level, provider }, (ev) => {
           switch (ev.type) {
             case "status": patch((m) => ({ ...m, step: ev.step })); break;
+            case "model": patch((m) => ({ ...m, provider: ev.provider, model: ev.model })); break;
             case "meta": patch((m) => ({ ...m, recalled: ev.recalled, sources: ev.sources, memoryOk: ev.memoryOk, provider: ev.provider, model: ev.model })); break;
             case "token": patch((m) => ({ ...m, content: m.content + ev.t })); break;
             case "done": patch((m) => ({ ...m, learned: ev.learned, sealError: ev.sealError, topic: ev.topic, step: null, streaming: false })); break;
@@ -174,7 +180,7 @@ export default function TutorPage() {
                   <div className="skeleton" style={{ height: 18, width: 220 }} />
                 ) : null}
                 {m.error && <div className="banner coral">{m.error}</div>}
-                {m.model && <div className="tiny" style={{ marginTop: 6 }}>via {m.model}</div>}
+                {m.model && !m.error && <div className="tiny" style={{ marginTop: 6 }}>via {m.model}</div>}
                 {m.sources && m.sources.length > 0 && (
                   <div className="sources">
                     {m.sources.map((s, i) => (

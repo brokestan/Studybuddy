@@ -6,13 +6,19 @@ import { Check, Copy, Gem, Lock, LogOut, Plus, Send, Sparkles } from "lucide-rea
 import { useProfile } from "@/components/ProfileProvider";
 import { Markdown } from "@/components/Markdown";
 import { browserSupabase, roomTopic } from "@/lib/client/realtime";
-import { postJson } from "@/lib/client/api";
+import { ApiError, postJson, type Provider } from "@/lib/client/api";
 import type { RoomHistoryLine } from "@/lib/roomHistory";
 
 interface RoomMsg { id: string; speakerId?: string; displayName: string; kind: "user" | "agent"; addressedToName?: string | null; content: string; createdAt: string }
-interface Mine { used: string[]; learned: string[]; fellBack: boolean }
+interface Mine { used: string[]; learned: string[]; fellBack: boolean; via: string | null }
 
 const ROOM_KEY = "studybuddy.room.v2";
+const PROVIDER_KEY = "studybuddy.room.provider";
+const PROVIDERS: { id: Provider; label: string }[] = [
+  { id: "groq", label: "Groq (Qwen)" },
+  { id: "gemini", label: "Gemini" },
+];
+const providerLabel = (p: Provider) => (p === "gemini" ? "Gemini" : "Groq");
 const ALPHA = "abcdefghjkmnpqrstuvwxyz23456789";
 function newRoomId() {
   const b = new Uint8Array(8); crypto.getRandomValues(b);
@@ -40,12 +46,17 @@ export default function RoomPage() {
   const [mine, setMine] = useState<Mine | null>(null);
   const [showMine, setShowMine] = useState(false);
   const [copied, setCopied] = useState(false);
+  // Same switch the Tutor has. It only changes which AI writes Buddy's replies —
+  // the memory Buddy reads (and the privacy rules around it) are identical either way.
+  const [provider, setProviderState] = useState<Provider>("groq");
   const [myId, setMyId] = useState("");
   const endRef = useRef<HTMLDivElement>(null);
   const sid = useRef(typeof crypto !== "undefined" ? crypto.randomUUID() : "x");
 
   useEffect(() => { try { const r = localStorage.getItem(ROOM_KEY); if (r) setRoomId(r); } catch { /* ignore */ } }, []);
   useEffect(() => { if (profile) speakerId(profile.code).then(setMyId); }, [profile]);
+  useEffect(() => { try { const v = localStorage.getItem(PROVIDER_KEY); if (v === "groq" || v === "gemini") setProviderState(v); } catch { /* ignore */ } }, []);
+  const setProvider = (p: Provider) => { setProviderState(p); try { localStorage.setItem(PROVIDER_KEY, p); } catch { /* ignore */ } };
 
   // Live wire: Supabase Broadcast (messages) + Presence (who's here). Nothing
   // is stored there — but Walrus IS the durable record, so as soon as we
@@ -100,13 +111,20 @@ export default function RoomPage() {
     const content = draft.trim();
     setDraft(""); setBusy(true); setErr(""); setMine(null);
     try {
-      const r = await postJson<{ usedPrivateNotes: string[]; learnedPrivate: string[]; guard: { fellBack: boolean } }>("/api/room/message", {
-        roomId, code: profile.code, name: profile.name, content, askBuddy,
+      const r = await postJson<{ usedPrivateNotes: string[]; learnedPrivate: string[]; guard: { fellBack: boolean }; provider: Provider; model: string | null }>("/api/room/message", {
+        roomId, code: profile.code, name: profile.name, content, askBuddy, provider,
         recentLines: msgs.slice(-8).map((m) => ({ displayName: m.displayName, kind: m.kind, content: m.content.slice(0, 300) })),
       });
-      if (askBuddy) setMine({ used: r.usedPrivateNotes, learned: r.learnedPrivate, fellBack: r.guard.fellBack });
+      // Shown only to the sender (in the private panel) — never broadcast to the room.
+      if (askBuddy) setMine({ used: r.usedPrivateNotes, learned: r.learnedPrivate, fellBack: r.guard.fellBack, via: r.model ? `${providerLabel(r.provider)} · ${r.model}` : null });
     } catch (e) {
-      setErr(e instanceof Error ? e.message : "Couldn’t send."); setDraft(content);
+      if (e instanceof ApiError && e.data.posted === true) {
+        // Buddy couldn't answer, but the student's own message already reached the room:
+        // don't hand the text back (re-sending would post it twice).
+        setErr(`${e.message} Your message was posted to the room.`);
+      } else {
+        setErr(e instanceof Error ? e.message : "Couldn’t send."); setDraft(content);
+      }
     } finally { setBusy(false); }
   }
 
@@ -140,6 +158,11 @@ export default function RoomPage() {
           <div className="card roombar">
             <div className="row gap wrap">
               <span className={`live ${live ? "on" : ""}`}><i /> {live ? "Live" : "Connecting…"}</span>
+              <div className="seg" role="group" aria-label="AI model for Buddy's replies">
+                {PROVIDERS.map((pr) => (
+                  <button key={pr.id} className={provider === pr.id ? "on" : ""} onClick={() => setProvider(pr.id)} title="Which AI writes Buddy's replies. You can switch anytime — Buddy's memory lives on Walrus, not inside either one.">{pr.label}</button>
+                ))}
+              </div>
               <button className="chip mint" title="Copy room code to share" onClick={async () => { try { await navigator.clipboard.writeText(roomId); setCopied(true); setTimeout(() => setCopied(false), 1400); } catch { /* blocked */ } }}>
                 {copied ? <Check size={13} /> : <Copy size={13} />} {roomId}
               </button>
@@ -177,6 +200,7 @@ export default function RoomPage() {
             <div className="private-note">
               <button className="chip amber" onClick={() => setShowMine((v) => !v)}><Lock size={12} /> used {mine.used.length} private note{mine.used.length === 1 ? "" : "s"} about you</button>
               {mine.learned.length > 0 && <span className="chip mint"><Gem size={12} /> learned {mine.learned.length} new {mine.learned.length === 1 ? "fact" : "facts"}</span>}
+              {mine.via && <span className="chip"><Sparkles size={12} /> answered via {mine.via}</span>}
               <span className="tiny">only you can see this{mine.fellBack ? " · reply was replaced by the privacy guard" : ""}</span>
               {showMine && mine.used.length > 0 && <ul className="drawer" style={{ width: "100%" }}>{mine.used.map((u, i) => <li key={i}>{u}</li>)}</ul>}
             </div>
